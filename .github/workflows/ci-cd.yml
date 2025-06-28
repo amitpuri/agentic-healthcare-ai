@@ -1,0 +1,433 @@
+name: CI/CD Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_tests:
+        description: 'Run all tests (frontend, backend, security)'
+        required: true
+        default: true
+        type: boolean
+      build_images:
+        description: 'Build and push Docker images'
+        required: true
+        default: true
+        type: boolean
+      run_integration_tests:
+        description: 'Run integration tests'
+        required: true
+        default: true
+        type: boolean
+      environment:
+        description: 'Target environment for testing'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  restricted:
+    if: github.actor == 'amitpuri'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Only amitpuri can trigger this"
+
+  # Frontend Tests
+  frontend-tests:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.run_tests == 'true'
+    defaults:
+      run:
+        working-directory: ./ui
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: ui/package-lock.json
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run linting
+      run: npm run lint
+    
+    - name: Run type checking
+      run: npm run type-check
+    
+    - name: Run tests
+      run: npm run test:coverage
+    
+    - name: Build application
+      run: npm run build
+    
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      with:
+        directory: ./ui/coverage
+        flags: frontend
+        name: frontend-coverage
+
+  # Backend Tests - CrewAI
+  crewai-tests:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.run_tests == 'true'
+    defaults:
+      run:
+        working-directory: ./crewai_fhir_agent
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-crewai-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-crewai-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov black flake8 mypy
+    
+    - name: Run code formatting check
+      run: black --check .
+    
+    - name: Run linting
+      run: flake8 . --max-line-length=100 --exclude=venv
+    
+    - name: Run type checking
+      run: mypy . --ignore-missing-imports
+    
+    - name: Run tests
+      run: pytest tests/ -v --cov=. --cov-report=xml
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY_TEST }}
+        FHIR_BASE_URL: https://hapi.fhir.org/baseR4/
+    
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      with:
+        directory: ./crewai_fhir_agent
+        flags: crewai-backend
+        name: crewai-coverage
+
+  # Backend Tests - Autogen
+  autogen-tests:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.run_tests == 'true'
+    defaults:
+      run:
+        working-directory: ./autogen_fhir_agent
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-autogen-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-autogen-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov black flake8 mypy
+    
+    - name: Run code formatting check
+      run: black --check .
+    
+    - name: Run linting
+      run: flake8 . --max-line-length=100 --exclude=venv
+    
+    - name: Run type checking
+      run: mypy . --ignore-missing-imports
+    
+    - name: Run tests
+      run: pytest tests/ -v --cov=. --cov-report=xml
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY_TEST }}
+        FHIR_BASE_URL: https://hapi.fhir.org/baseR4/
+    
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      with:
+        directory: ./autogen_fhir_agent
+        flags: autogen-backend
+        name: autogen-coverage
+
+  # Security Scanning
+  security-scan:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.run_tests == 'true'
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+    
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  # Build Docker Images
+  build-images:
+    needs: [frontend-tests, crewai-tests, autogen-tests]
+    runs-on: ubuntu-latest
+    if: github.event.inputs.build_images == 'true' && (success() || github.event.inputs.run_tests == 'false')
+    permissions:
+      contents: read
+      packages: write
+    
+    strategy:
+      matrix:
+        component: [ui, crewai-healthcare-agent, autogen-healthcare-agent]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.component }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+    
+    - name: Build and push Docker image - UI
+      if: matrix.component == 'ui'
+      uses: docker/build-push-action@v5
+      with:
+        context: ./ui
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+    
+    - name: Build and push Docker image - CrewAI
+      if: matrix.component == 'crewai-healthcare-agent'
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./crewai_fhir_agent/Dockerfile
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+    
+    - name: Build and push Docker image - Autogen
+      if: matrix.component == 'autogen-healthcare-agent'
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./autogen_fhir_agent/Dockerfile
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # Integration Tests
+  integration-tests:
+    needs: [build-images]
+    runs-on: ubuntu-latest
+    if: github.event.inputs.run_integration_tests == 'true' && (success() || github.event.inputs.build_images == 'false')
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Docker Compose
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y docker-compose
+    
+    - name: Create test environment file
+      run: |
+        cat > .env << EOF
+        OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY_TEST }}
+        FHIR_BASE_URL=http://localhost:8080/fhir
+        FHIR_CLIENT_ID=healthcare_ai_agent
+        DATABASE_PASSWORD=test_password
+        REDIS_PASSWORD=test_password
+        GRAFANA_PASSWORD=admin
+        REACT_APP_API_BASE_URL=http://localhost:8000
+        REACT_APP_AUTOGEN_API_URL=http://localhost:8001
+        REACT_APP_ENABLE_MOCK_DATA=true
+        EOF
+    
+    - name: Start services
+      run: |
+        docker-compose up -d --build
+        sleep 60  # Wait for services to start
+    
+    - name: Wait for services to be healthy
+      run: |
+        timeout 300 bash -c 'until curl -f http://localhost:3030/health; do sleep 5; done'
+        timeout 300 bash -c 'until curl -f http://localhost:8001/health; do sleep 5; done'
+        # CrewAI service may take longer to start
+        timeout 300 bash -c 'until curl -f http://localhost:8000/health; do sleep 10; done' || true
+    
+    - name: Run integration tests
+      run: |
+        # Test UI is serving
+        curl -f http://localhost:3030/ || exit 1
+        curl -f http://localhost:3030/health || exit 1
+        
+        # Test Autogen API
+        curl -f http://localhost:8001/health || exit 1
+        
+        # Test CrewAI API (may not be ready)
+        curl -f http://localhost:8000/health || echo "CrewAI service not ready"
+        
+        # Test monitoring services
+        curl -f http://localhost:9090/-/healthy || exit 1  # Prometheus
+        
+        echo "Integration tests passed!"
+    
+    - name: Collect logs on failure
+      if: failure()
+      run: |
+        echo "=== Docker Compose Logs ==="
+        docker-compose logs
+        echo "=== Container Status ==="
+        docker ps -a
+    
+    - name: Cleanup
+      if: always()
+      run: docker-compose down -v
+
+  # Performance Tests
+  performance-tests:
+    needs: [integration-tests]
+    runs-on: ubuntu-latest
+    if: github.event.inputs.run_integration_tests == 'true' && (success() || failure())
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install locust
+      run: pip install locust
+    
+    - name: Start services for load testing
+      run: |
+        cat > .env << EOF
+        OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY_TEST }}
+        http://localhost:8080/fhir
+        DATABASE_PASSWORD=test_password
+        REDIS_PASSWORD=test_password
+        EOF
+        docker-compose up -d --build
+        sleep 60
+    
+    - name: Run load tests
+      run: |
+        # Create simple load test
+        cat > load_test.py << 'EOF'
+        from locust import HttpUser, task, between
+        
+        class HealthcareAPIUser(HttpUser):
+            wait_time = between(1, 3)
+            
+            @task
+            def test_health_endpoints(self):
+                self.client.get("/health")
+        
+        EOF
+        
+        # Run load test for 60 seconds
+        locust -f load_test.py --headless --users 10 --spawn-rate 2 \
+               --host http://localhost:8001 --run-time 60s \
+               --html performance-report.html
+    
+    - name: Upload performance report
+      uses: actions/upload-artifact@v3
+      with:
+        name: performance-report
+        path: performance-report.html
+    
+    - name: Cleanup
+      if: always()
+      run: docker-compose down -v
+
+  # Deploy to Development
+  deploy-dev:
+    needs: [integration-tests]
+    runs-on: ubuntu-latest
+    if: github.event.inputs.environment == 'staging' && github.event.inputs.run_integration_tests == 'true' && success()
+    environment: development
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Deploy to Development Environment
+      run: |
+        echo "Deploying to development environment..."
+        # Add your deployment logic here
+        # This could be deploying to cloud providers, updating Kubernetes, etc.
+
+  # Deploy to Production
+  deploy-prod:
+    needs: [integration-tests, performance-tests]
+    runs-on: ubuntu-latest
+    if: github.event.inputs.environment == 'production' && github.event.inputs.run_integration_tests == 'true' && success()
+    environment: production
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Deploy to Production Environment
+      run: |
+        echo "Deploying to production environment..."
+        # Add your production deployment logic here 

@@ -1,0 +1,123 @@
+# Production Environment Configuration
+# Extends base.yaml with production-specific overrides
+
+environment: production
+
+# Network configuration for production
+network:
+  host: "${EXTERNAL_HOST}"
+  domain: "${DOMAIN_NAME}"
+  protocol: "https"
+  external_host: "${EXTERNAL_HOST}"
+
+# Service URLs for production (will be generated dynamically)
+# URLs will be generated from network configuration and service definitions
+
+# Production FHIR settings
+fhir:
+  base_url: "${FHIR_BASE_URL}"
+  client_id: "${FHIR_CLIENT_ID}"
+  client_secret: "${FHIR_CLIENT_SECRET}"
+  enable_test_data: false
+  timeout: 60
+  max_retries: 5
+
+# Database configuration for production
+database:
+  host: "${DATABASE_HOST}"
+  port: 5432
+  name: "${DATABASE_NAME}"
+  username: "${DATABASE_USERNAME}"
+  ssl_mode: "require"
+  pool_size: 20
+  max_overflow: 30
+
+# Redis configuration
+redis:
+  host: "${REDIS_HOST}"
+  port: 6379
+  db: 0
+  cluster_enabled: true
+  max_connections: 100
+
+# Enhanced security for production
+security:
+  cors:
+    allow_origins: ["${ALLOWED_ORIGINS}"]
+    allow_credentials: true
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 1000
+  jwt:
+    expire_minutes: 480  # 8 hours
+  encryption:
+    rotate_keys: true
+
+# Production features
+features:
+  mock_data: false
+  debug_mode: false
+  hot_reload: false
+  test_fixtures: false
+  advanced_analytics: true
+  audit_logging: true
+
+# Production logging
+logging:
+  level: "WARN"
+  format: "json"
+  audit_enabled: true
+  structured_logging: true
+  log_shipping: true
+
+# Production resources
+resources:
+  requests:
+    memory: "1Gi"
+    cpu: "500m"
+  limits:
+    memory: "4Gi"
+    cpu: "2000m"
+
+# Production scaling
+scaling:
+  replicas: 3
+  auto_scaling: true
+  min_replicas: 2
+  max_replicas: 10
+  target_cpu_utilization: 70
+
+# Health checks
+health_checks:
+  enabled: true
+  liveness_probe:
+    initial_delay: 30
+    period: 10
+    timeout: 5
+    failure_threshold: 3
+  readiness_probe:
+    initial_delay: 5
+    period: 5
+    timeout: 3
+    failure_threshold: 3
+
+# Monitoring for production
+monitoring:
+  metrics_enabled: true
+  tracing_enabled: true
+  log_aggregation: true
+  alerting: true
+  
+# Backup configuration
+backup:
+  enabled: true
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  retention_days: 30
+
+# Email configuration
+email:
+  enabled: true
+  provider: "${EMAIL_PROVIDER}"
+  smtp_host: "${SMTP_HOST}"
+  smtp_port: 587
+  use_tls: true 

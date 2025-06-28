@@ -1,0 +1,96 @@
+# Staging Environment Configuration
+# Extends base.yaml with staging-specific overrides
+
+environment: staging
+
+# Network configuration for staging
+network:
+  host: "${STAGING_HOST}"
+  domain: "${STAGING_DOMAIN}"
+  protocol: "https"
+  external_host: "${STAGING_HOST}"
+
+# Staging FHIR settings
+fhir:
+  base_url: "${STAGING_FHIR_BASE_URL}"
+  client_id: "${STAGING_FHIR_CLIENT_ID}"
+  client_secret: "${STAGING_FHIR_CLIENT_SECRET}"
+  enable_test_data: true
+  timeout: 45
+  max_retries: 4
+
+# Database configuration for staging
+database:
+  host: "${STAGING_DATABASE_HOST}"
+  port: 5432
+  name: "${STAGING_DATABASE_NAME}"
+  username: "${STAGING_DATABASE_USERNAME}"
+  ssl_mode: "require"
+  pool_size: 10
+  max_overflow: 15
+
+# Redis configuration
+redis:
+  host: "${STAGING_REDIS_HOST}"
+  port: 6379
+  db: 0
+  cluster_enabled: false
+  max_connections: 50
+
+# Security for staging
+security:
+  cors:
+    allow_origins: ["${STAGING_ALLOWED_ORIGINS}"]
+    allow_credentials: true
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 500
+  jwt:
+    expire_minutes: 720  # 12 hours
+
+# Staging features
+features:
+  mock_data: true
+  debug_mode: false
+  hot_reload: false
+  test_fixtures: true
+  advanced_analytics: false
+  audit_logging: true
+
+# Staging logging
+logging:
+  level: "INFO"
+  format: "json"
+  audit_enabled: true
+  structured_logging: false
+
+# Staging resources
+resources:
+  requests:
+    memory: "512Mi"
+    cpu: "250m"
+  limits:
+    memory: "2Gi"
+    cpu: "1000m"
+
+# Staging scaling
+scaling:
+  replicas: 2
+  auto_scaling: false
+  min_replicas: 1
+  max_replicas: 4
+
+# Monitoring for staging
+monitoring:
+  metrics_enabled: true
+  tracing_enabled: false
+  log_aggregation: true
+  alerting: false
+
+# Email configuration
+email:
+  enabled: true
+  provider: "${STAGING_EMAIL_PROVIDER}"
+  smtp_host: "${STAGING_SMTP_HOST}"
+  smtp_port: 587
+  use_tls: true 

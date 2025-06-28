@@ -1,0 +1,96 @@
+version: '3.8'
+
+services:
+  # Real Agent Backend Service
+  agent-backend:
+    build:
+      context: ../
+      dockerfile: agent_backend/Dockerfile
+    container_name: ai-agent-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8002"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - FHIR_SERVER_URL=${FHIR_SERVER_URL:-https://hapi.fhir.org/baseR4}
+      - FHIR_AUTH_TOKEN=${FHIR_AUTH_TOKEN}
+      - WEBHOOK_URL=${WEBHOOK_URL}
+      - PYTHONPATH=/app:/app/shared:/app/autogen_fhir_agent:/app/crewai_fhir_agent
+    volumes:
+      - ../shared:/app/shared:ro
+      - ../autogen_fhir_agent:/app/autogen_fhir_agent:ro
+      - ../crewai_fhir_agent:/app/crewai_fhir_agent:ro
+      - agent-logs:/app/logs
+    networks:
+      - ai-agents-network
+    depends_on:
+      - postgres
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.agent-backend.rule=Host(`localhost`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.agent-backend.entrypoints=web"
+      - "traefik.http.services.agent-backend.loadbalancer.server.port=8000"
+
+  # PostgreSQL for agent data persistence
+  postgres:
+    image: postgres:15-alpine
+    container_name: ai-agents-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ai_agents
+      POSTGRES_USER: ${POSTGRES_USER:-ai_agents}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ai_agents_password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./services/postgres/init-agents.sql:/docker-entrypoint-initdb.d/init-agents.sql
+    networks:
+      - ai-agents-network
+    ports:
+      - "5433:5432"  # Different port to avoid conflicts
+
+  # Redis for caching and session management
+  redis:
+    image: redis:7-alpine
+    container_name: ai-agents-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-ai_agents_redis}
+    volumes:
+      - redis-data:/data
+    networks:
+      - ai-agents-network
+    ports:
+      - "6380:6379"  # Different port to avoid conflicts
+
+  # Nginx proxy for the agent backend
+  nginx-agents:
+    image: nginx:alpine
+    container_name: ai-agents-nginx
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - ./services/nginx/nginx-agents.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - ai-agents-network
+    depends_on:
+      - agent-backend
+
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+  agent-logs:
+    driver: local
+
+networks:
+  ai-agents-network:
+    driver: bridge
+    name: ai-agents-network 

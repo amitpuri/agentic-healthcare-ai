@@ -1,0 +1,227 @@
+# ==================================================================
+# Healthcare AI Configuration Schema
+# Base configuration with defaults for all environments
+# ==================================================================
+
+application:
+  name: "healthcare-ai"
+  version: "1.0.0"
+  namespace: "healthcare-ai"
+
+# Network Configuration
+network:
+  host: "localhost"
+  domain: ""  # For external access, e.g., "myapp.com"
+  protocol: "http"  # or "https"
+  external_host: "${EXTERNAL_HOST}"  # Override for external access
+
+# Service Registry - Central definition of all services
+services:
+  # AI Agent Services
+  crewai-agent:
+    name: "crewai-healthcare-agent"
+    port: 8000
+    path: "/api/v1"
+    health_endpoint: "/health"
+    metrics_endpoint: "/metrics"
+    
+  autogen-agent:
+    name: "autogen-healthcare-agent"
+    port: 8001
+    path: "/api/v1"
+    health_endpoint: "/health"
+    metrics_endpoint: "/metrics"
+    
+  agent-backend:
+    name: "agent-backend"
+    port: 8002
+    path: "/api/v1"
+    health_endpoint: "/api/health"
+    metrics_endpoint: "/metrics"
+    
+  # Infrastructure Services
+  fhir-proxy:
+    name: "fhir-proxy"
+    port: 8003
+    path: "/fhir"
+    health_endpoint: "/health"
+    
+  fhir-mcp-server:
+    name: "fhir-mcp-server"
+    port: 8004
+    path: "/mcp"
+    health_endpoint: "/health"
+    
+  # Frontend
+  ui:
+    name: "healthcare-ui"
+    port: 3030
+    internal_port: 80
+    path: "/"
+    
+  # Data Services
+  postgres:
+    name: "postgres"
+    port: 5432
+    database: "healthcare_ai"
+    
+  redis:
+    name: "redis"
+    port: 6379
+    
+  # Monitoring
+  prometheus:
+    name: "prometheus"
+    port: 9090
+    
+  grafana:
+    name: "grafana"
+    port: 3000
+
+# Environment-specific overrides structure
+environments:
+  development:
+    replicas: 1
+    resources:
+      requests:
+        memory: "128Mi"
+        cpu: "100m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+        
+  staging:
+    replicas: 2
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "200m"
+      limits:
+        memory: "1Gi"
+        cpu: "1000m"
+        
+  production:
+    replicas: 3
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "500m"
+      limits:
+        memory: "2Gi"
+        cpu: "2000m"
+
+# FHIR Configuration Templates
+fhir:
+  default:
+    base_url: "https://hapi.fhir.org/baseR4"
+    version: "R4"
+    timeout: 30
+    max_retries: 3
+    
+  providers:
+    hapi_public:
+      base_url: "https://hapi.fhir.org/baseR4"
+      description: "Public HAPI FHIR server for testing"
+      
+    smart_health_it:
+      base_url: "https://r4.smarthealthit.org"
+      description: "SMART Health IT FHIR server"
+      
+    custom:
+      base_url: "${FHIR_BASE_URL}"
+      description: "Custom FHIR server"
+
+# Security Configuration
+security:
+  jwt:
+    algorithm: "HS256"
+    expire_minutes: 1440  # 24 hours
+    
+  cors:
+    allow_origins: ["*"]
+    allow_methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    allow_headers: ["*"]
+    allow_credentials: true
+    
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 100
+    
+  encryption:
+    algorithm: "AES-256-GCM"
+
+# Feature Flags
+features:
+  clinical_decision_support: true
+  drug_interaction_checking: true
+  risk_scoring: true
+  audit_logging: true
+  rate_limiting: true
+  mock_data: false
+  smart_auth: true
+
+# Performance Configuration
+performance:
+  max_workers: 4
+  request_timeout: 300
+  conversation_timeout: 600
+  max_conversation_length: 50
+  cache_ttl: 3600
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  format: "json"
+  audit_enabled: true
+  retention_days: 30
+
+# Monitoring Configuration
+monitoring:
+  prometheus:
+    enabled: true
+    scrape_interval: "15s"
+    retention: "15d"
+    
+  grafana:
+    enabled: true
+    admin_user: "admin"
+    
+  health_checks:
+    enabled: true
+    interval: 30
+    timeout: 10
+    retries: 3
+
+# HIPAA Compliance Settings
+compliance:
+  audit_all_requests: true
+  encrypt_phi: true
+  anonymize_logs: true
+  data_retention_days: 2555  # 7 years
+  auto_logout_minutes: 30
+
+# Cloud Provider Templates
+cloud_providers:
+  gcp:
+    region: "us-central1"
+    project_id: "${GCP_PROJECT_ID}"
+    cluster_name: "healthcare-ai-cluster"
+    
+  aws:
+    region: "us-east-1"
+    account_id: "${AWS_ACCOUNT_ID}"
+    cluster_name: "healthcare-ai-cluster"
+    
+  azure:
+    location: "eastus"
+    subscription_id: "${AZURE_SUBSCRIPTION_ID}"
+    resource_group: "healthcare-ai-rg"
+
+# MCP Configuration
+mcp:
+  server_request_timeout: 10000
+  request_timeout_reset_on_progress: true
+  request_max_total_timeout: 60000
+  proxy_full_address: "localhost"
+  client_port: 6274
+  server_port: 6277 

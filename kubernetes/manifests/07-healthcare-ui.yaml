@@ -1,0 +1,165 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: healthcare-ui
+  namespace: healthcare-ai
+  labels:
+    app: healthcare-ui
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: healthcare-ui
+  template:
+    metadata:
+      labels:
+        app: healthcare-ui
+    spec:
+      containers:
+      - name: healthcare-ui
+        image: healthcare-ai/healthcare-ui:latest
+        imagePullPolicy: Never  # For local Docker images
+        ports:
+        - containerPort: 80
+        - containerPort: 443
+        env:
+        # Network Configuration - NEW
+        - name: NETWORK_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: NETWORK_HOST
+        - name: NETWORK_PROTOCOL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: NETWORK_PROTOCOL
+        - name: EXTERNAL_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: EXTERNAL_HOST
+        - name: ENVIRONMENT
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: ENVIRONMENT
+        # Application Environment
+        - name: NODE_ENV
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: NODE_ENV
+        # Service URLs - Using new dynamic URLs
+        - name: REACT_APP_FHIR_MCP_URL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: FHIR_MCP_URL
+        - name: REACT_APP_FHIR_PROXY_URL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: FHIR_PROXY_URL
+        - name: REACT_APP_AGENT_BACKEND_URL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: AGENT_BACKEND_URL
+        - name: REACT_APP_CREWAI_API_URL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: CREWAI_API_URL
+        - name: REACT_APP_AUTOGEN_API_URL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: AUTOGEN_API_URL
+        # Legacy environment variables (for backward compatibility)
+        - name: REACT_APP_CREWAI_API_URL_LEGACY
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: CREWAI_SERVICE_URL
+        - name: REACT_APP_AUTOGEN_API_URL_LEGACY
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: AUTOGEN_SERVICE_URL
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "250m"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: healthcare-ui-service
+  namespace: healthcare-ai
+  labels:
+    app: healthcare-ui
+spec:
+  selector:
+    app: healthcare-ui
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+    nodePort: 30080
+  - name: https
+    port: 443
+    targetPort: 443
+    nodePort: 30443
+  type: NodePort
+
+---
+# Ingress for external access
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: healthcare-ui-ingress
+  namespace: healthcare-ai
+  labels:
+    app: healthcare-ui
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  rules:
+  - host: healthcare-ai.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: healthcare-ui-service
+            port:
+              number: 80
+  - host: localhost
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: healthcare-ui-service
+            port:
+              number: 80 

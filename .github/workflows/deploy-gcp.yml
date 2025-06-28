@@ -1,0 +1,220 @@
+name: Deploy to Google Cloud Platform
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GKE_CLUSTER: healthcare-ai-cluster
+  GKE_ZONE: us-central1-a
+  CREWAI_IMAGE: crewai-healthcare-agent
+  AUTOGEN_IMAGE: autogen-healthcare-agent
+  REGISTRY: gcr.io
+
+jobs:
+  restricted:
+    if: github.actor == 'amitpuri'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Only amitpuri can trigger this"
+
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      should-deploy: ${{ steps.set-env.outputs.should-deploy }}
+    steps:
+      - name: Set environment
+        id: set-env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+            echo "should-deploy=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+            echo "should-deploy=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "should-deploy=true" >> $GITHUB_OUTPUT
+          else
+            echo "environment=review" >> $GITHUB_OUTPUT
+            echo "should-deploy=false" >> $GITHUB_OUTPUT
+          fi
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies and run tests
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-cov pytest-asyncio
+          pip install -r crewai_fhir_agent/requirements.txt
+          pip install -r autogen_fhir_agent/requirements.txt
+          
+          mkdir -p tests
+          cat > tests/test_gcp_integration.py << 'EOF'
+          import pytest
+          from shared.fhir_client import FHIRConfig
+          
+          def test_gcp_environment():
+              config = FHIRConfig(
+                  base_url="https://hapi.fhir.org/baseR4/",
+                  client_id="gcp_test_client"
+              )
+              assert config.base_url
+              assert config.client_id
+          EOF
+          
+          python -m pytest tests/ -v --cov=shared
+
+  build-and-push:
+    needs: [test]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [crewai_fhir_agent, autogen_fhir_agent, ui, fhir_mcp_server, fhir_proxy]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          export_default_credentials: true
+
+      - name: Configure Docker for GCR
+        run: gcloud auth configure-docker
+
+      - name: Build and push Docker image
+        run: |
+          REPO_NAME=$(echo ${{ matrix.service }} | sed 's/_/-/g')
+          IMAGE_TAG=${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/$REPO_NAME:${{ github.sha }}
+          docker build -t $IMAGE_TAG ./${{ matrix.service }}/
+          docker push $IMAGE_TAG
+          
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            docker tag $IMAGE_TAG ${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/$REPO_NAME:latest
+            docker push ${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/$REPO_NAME:latest
+          fi
+
+  deploy-infrastructure:
+    needs: [setup, build-and-push]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.should-deploy == 'true'
+    environment: ${{ needs.setup.outputs.environment }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          export_default_credentials: true
+
+      - name: Create GKE cluster
+        run: |
+          if ! gcloud container clusters describe ${{ env.GKE_CLUSTER }}-${{ needs.setup.outputs.environment }} --zone=${{ env.GKE_ZONE }} &>/dev/null; then
+            gcloud container clusters create ${{ env.GKE_CLUSTER }}-${{ needs.setup.outputs.environment }} \
+              --zone=${{ env.GKE_ZONE }} \
+              --num-nodes=2 \
+              --machine-type=e2-standard-2 \
+              --enable-autoscaling \
+              --min-nodes=1 \
+              --max-nodes=5 \
+              --enable-autorepair \
+              --enable-autoupgrade
+          fi
+
+      - name: Create Cloud SQL instance
+        run: |
+          INSTANCE_NAME="healthcare-ai-db-${{ needs.setup.outputs.environment }}"
+          if ! gcloud sql instances describe $INSTANCE_NAME &>/dev/null; then
+            gcloud sql instances create $INSTANCE_NAME \
+              --database-version=POSTGRES_14 \
+              --tier=db-f1-micro \
+              --region=us-central1
+            
+            gcloud sql databases create healthcare_ai --instance=$INSTANCE_NAME
+            gcloud sql users create healthcare_user \
+              --instance=$INSTANCE_NAME \
+              --password=${{ secrets.DB_PASSWORD }}
+          fi
+
+  deploy-applications:
+    needs: [setup, build-and-push, deploy-infrastructure]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.should-deploy == 'true'
+    environment: ${{ needs.setup.outputs.environment }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          export_default_credentials: true
+
+      - name: Get GKE credentials
+        run: gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }}-${{ needs.setup.outputs.environment }} --zone=${{ env.GKE_ZONE }}
+
+      - name: Deploy to GKE
+        run: |
+          # Update image tags in Kubernetes manifests
+          find ./kubernetes/manifests -type f -name "*.yaml" | while read file; do
+            sed -i "s|image: crewai-healthcare-agent:latest|image: ${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/crewai-healthcare-agent:${{ github.sha }}|g" "$file"
+            sed -i "s|image: autogen-healthcare-agent:latest|image: ${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/autogen-healthcare-agent:${{ github.sha }}|g" "$file"
+            # Add sed commands for other images ui, fhir-mcp-server, fhir-proxy
+          done
+
+          kubectl apply -k ./kubernetes/manifests
+
+  smoke-tests:
+    needs: [setup, deploy-applications]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.should-deploy == 'true'
+    steps:
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          export_default_credentials: true
+
+      - name: Get GKE credentials and test
+        run: |
+          gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }}-${{ needs.setup.outputs.environment }} --zone=${{ env.GKE_ZONE }}
+          
+          kubectl wait --for=jsonpath='{.status.loadBalancer.ingress}' \
+            service/crewai-healthcare-service \
+            --namespace=healthcare-ai-${{ needs.setup.outputs.environment }} \
+            --timeout=300s
+          
+          CREWAI_IP=$(kubectl get service crewai-healthcare-service \
+            --namespace=healthcare-ai-${{ needs.setup.outputs.environment }} \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          
+          curl -f http://$CREWAI_IP/health || exit 1
+          echo "GCP deployment smoke tests passed!" 

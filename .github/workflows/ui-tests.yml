@@ -1,0 +1,299 @@
+name: UI Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_type:
+        description: 'Type of UI tests to run'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - unit-only
+          - accessibility-only
+          - e2e-only
+          - visual-regression-only
+          - bundle-analysis-only
+      browser:
+        description: 'Browser for e2e tests'
+        required: false
+        default: 'chromium'
+        type: choice
+        options:
+          - chromium
+          - firefox
+          - webkit
+          - all
+      environment:
+        description: 'Test environment'
+        required: true
+        default: 'test'
+        type: choice
+        options:
+          - test
+          - staging
+
+jobs:
+  restricted:
+    if: github.actor == 'amitpuri'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Only amitpuri can trigger this"
+
+  ui-unit-tests:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'unit-only'
+    defaults:
+      run:
+        working-directory: ./ui
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: ui/package-lock.json
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run unit tests
+      run: npm test -- --coverage --watchAll=false
+    
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      with:
+        directory: ./ui/coverage
+
+  ui-accessibility-tests:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'accessibility-only'
+    defaults:
+      run:
+        working-directory: ./ui
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: ui/package-lock.json
+    
+    - name: Install dependencies
+      run: |
+        npm ci
+        npm install -g @axe-core/cli
+    
+    - name: Build application
+      run: npm run build
+    
+    - name: Serve application
+      run: |
+        npx serve -s build -l 3000 &
+        sleep 10
+    
+    - name: Run accessibility tests
+      run: |
+        npx axe http://localhost:3000 --exit
+    
+    - name: Run Pa11y tests
+      run: |
+        npm install -g pa11y
+        pa11y http://localhost:3000
+
+  ui-e2e-tests:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'e2e-only'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+    
+    - name: Install UI dependencies
+      run: |
+        cd ui
+        npm ci
+    
+    - name: Install Playwright
+      run: |
+        cd ui
+        npx playwright install --with-deps
+    
+    - name: Start backend services
+      run: |
+        # Create minimal test environment
+        cat > .env << EOF
+        OPENAI_API_KEY=test_key
+        FHIR_BASE_URL=http://localhost:8080/fhir
+        DATABASE_PASSWORD=test_password
+        REDIS_PASSWORD=test_password
+        REACT_APP_API_BASE_URL=http://localhost:8000
+        REACT_APP_AUTOGEN_API_URL=http://localhost:8001
+        REACT_APP_ENABLE_MOCK_DATA=true
+        EOF
+        
+        # Start only essential services for e2e tests
+        docker-compose up -d postgres redis
+        sleep 10
+    
+    - name: Start UI application
+      run: |
+        cd ui
+        npm start &
+        # Wait for UI to be ready
+        timeout 60 bash -c 'until curl -f http://localhost:3000; do sleep 2; done'
+    
+    - name: Run Playwright tests
+      run: |
+        cd ui
+        npx playwright test
+    
+    - name: Upload Playwright report
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: playwright-report
+        path: ui/playwright-report/
+        retention-days: 30
+    
+    - name: Cleanup
+      if: always()
+      run: |
+        docker-compose down -v
+
+  ui-visual-regression:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'visual-regression-only'
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+    
+    - name: Install UI dependencies
+      run: |
+        cd ui
+        npm ci
+    
+    - name: Install visual testing tools
+      run: |
+        cd ui
+        npm install --save-dev @storybook/cli chromatic
+    
+    - name: Build Storybook
+      run: |
+        cd ui
+        npm run build-storybook
+    
+    - name: Run visual regression tests
+      run: |
+        cd ui
+        # Run chromatic for visual regression testing
+        npx chromatic --project-token=${{ secrets.CHROMATIC_PROJECT_TOKEN }} --exit-zero-on-changes
+      env:
+        CHROMATIC_PROJECT_TOKEN: ${{ secrets.CHROMATIC_PROJECT_TOKEN }}
+
+  ui-bundle-analysis:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'bundle-analysis-only'
+    defaults:
+      run:
+        working-directory: ./ui
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: ui/package-lock.json
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Build and analyze bundle
+      run: |
+        npm run build
+        npx webpack-bundle-analyzer build/static/js/*.js --mode=static --report=bundle-report.html --no-open
+    
+    - name: Upload bundle analysis
+      uses: actions/upload-artifact@v3
+      with:
+        name: bundle-analysis
+        path: ui/bundle-report.html
+
+  ui-lighthouse:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+    
+    - name: Install dependencies
+      run: |
+        cd ui
+        npm ci
+        npm install -g @lhci/cli
+    
+    - name: Build application
+      run: |
+        cd ui
+        npm run build
+    
+    - name: Run Lighthouse CI
+      run: |
+        cd ui
+        lhci autorun
+      env:
+        LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+
+  ui-security-scan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./ui
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: ui/package-lock.json
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run npm audit
+      run: npm audit --audit-level=moderate
+    
+    - name: Run Snyk security scan
+      uses: snyk/actions/node@master
+      with:
+        args: --project-name=healthcare-ai-ui --file=ui/package.json
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }} 

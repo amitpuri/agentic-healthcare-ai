@@ -1,0 +1,454 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crewai-healthcare-agent
+  namespace: healthcare-ai
+  labels:
+    app: crewai-healthcare-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crewai-healthcare-agent
+  template:
+    metadata:
+      labels:
+        app: crewai-healthcare-agent
+    spec:
+      containers:
+      - name: crewai-healthcare-agent
+        image: healthcare-ai/crewai-healthcare-agent:latest
+        imagePullPolicy: Never  # For local Docker images
+        ports:
+        - containerPort: 8000
+        env:
+        - name: NETWORK_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: NETWORK_HOST
+        - name: NETWORK_PROTOCOL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: NETWORK_PROTOCOL
+        - name: EXTERNAL_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: EXTERNAL_HOST
+        - name: ENVIRONMENT
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: ENVIRONMENT
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: OPENAI_API_KEY
+        - name: FHIR_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: FHIR_BASE_URL
+        - name: FHIR_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: FHIR_CLIENT_ID
+        - name: FHIR_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: FHIR_CLIENT_SECRET
+        - name: DATABASE_URL
+          value: "postgresql://healthcare_user:$(DATABASE_PASSWORD)@postgres-service:5432/healthcare_ai"
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: DATABASE_PASSWORD
+        - name: REDIS_URL
+          value: "redis://:$(REDIS_PASSWORD)@redis-service:6379"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: REDIS_PASSWORD
+        - name: FHIR_MCP_URL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: FHIR_MCP_INTERNAL_URL
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: crewai-healthcare-agent
+  namespace: healthcare-ai
+  labels:
+    app: crewai-healthcare-agent
+spec:
+  selector:
+    app: crewai-healthcare-agent
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+    nodePort: 30000
+  type: NodePort
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: autogen-healthcare-agent
+  namespace: healthcare-ai
+  labels:
+    app: autogen-healthcare-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: autogen-healthcare-agent
+  template:
+    metadata:
+      labels:
+        app: autogen-healthcare-agent
+    spec:
+      containers:
+      - name: autogen-healthcare-agent
+        image: healthcare-ai/autogen-healthcare-agent:latest
+        imagePullPolicy: Never  # For local Docker images
+        ports:
+        - containerPort: 8001
+        env:
+        - name: NETWORK_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: NETWORK_HOST
+        - name: NETWORK_PROTOCOL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: NETWORK_PROTOCOL
+        - name: EXTERNAL_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: EXTERNAL_HOST
+        - name: ENVIRONMENT
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: ENVIRONMENT
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: OPENAI_API_KEY
+        - name: FHIR_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: FHIR_BASE_URL
+        - name: FHIR_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: FHIR_CLIENT_ID
+        - name: FHIR_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: FHIR_CLIENT_SECRET
+        - name: DATABASE_URL
+          value: "postgresql://healthcare_user:$(DATABASE_PASSWORD)@postgres-service:5432/healthcare_ai"
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: DATABASE_PASSWORD
+        - name: REDIS_URL
+          value: "redis://:$(REDIS_PASSWORD)@redis-service:6379"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: REDIS_PASSWORD
+        - name: FHIR_MCP_URL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: FHIR_MCP_INTERNAL_URL
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: autogen-healthcare-agent
+  namespace: healthcare-ai
+  labels:
+    app: autogen-healthcare-agent
+spec:
+  selector:
+    app: autogen-healthcare-agent
+  ports:
+  - name: http
+    port: 8001
+    targetPort: 8001
+    nodePort: 30001
+  type: NodePort
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-backend
+  namespace: healthcare-ai
+  labels:
+    app: agent-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-backend
+  template:
+    metadata:
+      labels:
+        app: agent-backend
+    spec:
+      containers:
+      - name: agent-backend
+        image: healthcare-ai/agent-backend:latest
+        imagePullPolicy: Never  # For local Docker images
+        ports:
+        - containerPort: 8002
+        env:
+        - name: NETWORK_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: NETWORK_HOST
+        - name: NETWORK_PROTOCOL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: NETWORK_PROTOCOL
+        - name: EXTERNAL_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: EXTERNAL_HOST
+        - name: ENVIRONMENT
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: ENVIRONMENT
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: OPENAI_API_KEY
+        - name: FHIR_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: FHIR_BASE_URL
+        - name: DATABASE_URL
+          value: "postgresql://healthcare_user:$(DATABASE_PASSWORD)@postgres-service:5432/healthcare_ai"
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: DATABASE_PASSWORD
+        - name: REDIS_URL
+          value: "redis://:$(REDIS_PASSWORD)@redis-service:6379"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: REDIS_PASSWORD
+        - name: FHIR_MCP_URL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: FHIR_MCP_INTERNAL_URL
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 8002
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 8002
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-backend
+  namespace: healthcare-ai
+  labels:
+    app: agent-backend
+spec:
+  selector:
+    app: agent-backend
+  ports:
+  - name: http
+    port: 8002
+    targetPort: 8002
+    nodePort: 30082
+  type: NodePort
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fhir-mcp-server
+  namespace: healthcare-ai
+  labels:
+    app: fhir-mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fhir-mcp-server
+  template:
+    metadata:
+      labels:
+        app: fhir-mcp-server
+    spec:
+      containers:
+      - name: fhir-mcp-server
+        image: healthcare-ai/fhir-mcp-server:latest
+        imagePullPolicy: Never  # For local Docker images
+        ports:
+        - containerPort: 8004
+        env:
+        - name: NETWORK_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: NETWORK_HOST
+        - name: NETWORK_PROTOCOL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: NETWORK_PROTOCOL
+        - name: EXTERNAL_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: EXTERNAL_HOST
+        - name: ENVIRONMENT
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: ENVIRONMENT
+        - name: FHIR_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: FHIR_BASE_URL
+        - name: FHIR_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: FHIR_CLIENT_ID
+              optional: true
+        - name: FHIR_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: FHIR_CLIENT_SECRET
+              optional: true
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "250m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8004
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8004
+          initialDelaySeconds: 10
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fhir-mcp-server
+  namespace: healthcare-ai
+  labels:
+    app: fhir-mcp-server
+spec:
+  selector:
+    app: fhir-mcp-server
+  ports:
+  - name: http
+    port: 8004
+    targetPort: 8004
+    nodePort: 30084
+  type: NodePort 

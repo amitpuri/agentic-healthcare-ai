@@ -1,0 +1,266 @@
+# GitHub Environments Configuration Template
+# Copy this file and customize for your specific setup
+
+# ===================================
+# GITHUB REPOSITORY SETTINGS
+# ===================================
+
+# 1. Create Environments in GitHub:
+#    - Go to Settings > Environments
+#    - Create: staging, production
+#    - Configure protection rules as needed
+
+# 2. Add Branch Protection Rules:
+#    - main: Require pull request reviews, dismiss stale reviews
+#    - develop: Require status checks to pass
+
+# ===================================
+# REPOSITORY SECRETS
+# ===================================
+
+# Common Secrets (add to repository level)
+secrets:
+  # OpenAI Configuration
+  OPENAI_API_KEY: "your-openai-api-key"
+  
+  # FHIR Server Configuration  
+  FHIR_BASE_URL: "https://hapi.fhir.org/baseR4/"
+  FHIR_CLIENT_ID: "healthcare-ai-client"
+  FHIR_CLIENT_SECRET: "your-fhir-client-secret"
+  
+  # Application Security
+  JWT_SECRET_KEY: "your-jwt-secret-key"
+  DB_PASSWORD: "your-database-password"
+
+  # Google Cloud Platform
+  GCP_PROJECT_ID: "your-gcp-project-id"
+  GCP_SA_KEY: |
+    {
+      "type": "service_account",
+      "project_id": "your-project-id",
+      "private_key_id": "key-id",
+      "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
+      "client_email": "service-account@project.iam.gserviceaccount.com",
+      "client_id": "client-id",
+      "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+      "token_uri": "https://oauth2.googleapis.com/token"
+    }
+
+  # Amazon Web Services
+  AWS_ACCESS_KEY_ID: "your-aws-access-key-id"
+  AWS_SECRET_ACCESS_KEY: "your-aws-secret-access-key"
+  AWS_ACCOUNT_ID: "123456789012"
+
+  # Microsoft Azure
+  AZURE_CREDENTIALS: |
+    {
+      "clientId": "your-client-id",
+      "clientSecret": "your-client-secret",
+      "subscriptionId": "your-subscription-id",
+      "tenantId": "your-tenant-id"
+    }
+
+# ===================================
+# ENVIRONMENT-SPECIFIC SECRETS
+# ===================================
+
+# Staging Environment Secrets
+environments:
+  staging:
+    secrets:
+      # Override any staging-specific values here
+      FHIR_BASE_URL: "https://staging-fhir.example.com/"
+      DB_PASSWORD: "staging-db-password"
+    
+    # Environment protection rules
+    protection_rules:
+      required_reviewers: 0
+      wait_timer: 0
+      
+  production:
+    secrets:
+      # Override any production-specific values here  
+      FHIR_BASE_URL: "https://prod-fhir.example.com/"
+      DB_PASSWORD: "production-db-password"
+    
+    # Environment protection rules
+    protection_rules:
+      required_reviewers: 2
+      wait_timer: 5  # minutes
+
+# ===================================
+# SETUP INSTRUCTIONS
+# ===================================
+
+setup_instructions: |
+  
+  1. GOOGLE CLOUD PLATFORM SETUP:
+     ================================
+     
+     # Create service account
+     gcloud iam service-accounts create github-actions \
+       --description="GitHub Actions CI/CD" \
+       --display-name="GitHub Actions"
+     
+     # Grant necessary permissions
+     gcloud projects add-iam-policy-binding PROJECT_ID \
+       --member="serviceAccount:github-actions@PROJECT_ID.iam.gserviceaccount.com" \
+       --role="roles/container.admin"
+     
+     gcloud projects add-iam-policy-binding PROJECT_ID \
+       --member="serviceAccount:github-actions@PROJECT_ID.iam.gserviceaccount.com" \
+       --role="roles/storage.admin"
+     
+     gcloud projects add-iam-policy-binding PROJECT_ID \
+       --member="serviceAccount:github-actions@PROJECT_ID.iam.gserviceaccount.com" \
+       --role="roles/cloudsql.admin"
+     
+     # Create and download key
+     gcloud iam service-accounts keys create key.json \
+       --iam-account=github-actions@PROJECT_ID.iam.gserviceaccount.com
+     
+     # Use contents of key.json for GCP_SA_KEY secret
+
+  2. AMAZON WEB SERVICES SETUP:
+     ============================
+     
+     # Create IAM user for GitHub Actions
+     aws iam create-user --user-name github-actions-user
+     
+     # Create access key
+     aws iam create-access-key --user-name github-actions-user
+     
+     # Attach required policies
+     aws iam attach-user-policy \
+       --user-name github-actions-user \
+       --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+     
+     aws iam attach-user-policy \
+       --user-name github-actions-user \
+       --policy-arn arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+     
+     aws iam attach-user-policy \
+       --user-name github-actions-user \
+       --policy-arn arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+     
+     aws iam attach-user-policy \
+       --user-name github-actions-user \
+       --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+     
+     aws iam attach-user-policy \
+       --user-name github-actions-user \
+       --policy-arn arn:aws:iam::aws:policy/AmazonRDSFullAccess
+
+  3. MICROSOFT AZURE SETUP:
+     ======================
+     
+     # Login to Azure
+     az login
+     
+     # Create service principal
+     az ad sp create-for-rbac --name "github-actions" \
+       --role contributor \
+       --scopes /subscriptions/YOUR_SUBSCRIPTION_ID \
+       --sdk-auth
+     
+     # The output JSON goes into AZURE_CREDENTIALS secret
+     
+     # Grant additional permissions for AKS
+     az role assignment create \
+       --assignee SERVICE_PRINCIPAL_ID \
+       --role "Azure Kubernetes Service Cluster Admin Role"
+
+  4. REPOSITORY CONFIGURATION:
+     =========================
+     
+     # Create environments
+     curl -X PUT \
+       -H "Accept: application/vnd.github.v3+json" \
+       -H "Authorization: token YOUR_GITHUB_TOKEN" \
+       https://api.github.com/repos/OWNER/REPO/environments/staging
+     
+     curl -X PUT \
+       -H "Accept: application/vnd.github.v3+json" \
+       -H "Authorization: token YOUR_GITHUB_TOKEN" \
+       https://api.github.com/repos/OWNER/REPO/environments/production
+     
+     # Add secrets via GitHub UI or API
+     # Settings > Secrets and variables > Actions
+
+  5. TESTING:
+     ========
+     
+     # Test with a feature branch first
+     git checkout -b test-deployment
+     git push origin test-deployment
+     
+     # Check workflow runs in GitHub Actions tab
+     # Verify builds complete successfully
+     
+     # Then test staging deployment
+     git checkout develop
+     git push origin develop
+     
+     # Finally test production deployment
+     git checkout main
+     git push origin main
+
+# ===================================
+# SECURITY BEST PRACTICES
+# ===================================
+
+security_checklist:
+  - "✅ Use least privilege IAM policies"
+  - "✅ Rotate service account keys regularly"
+  - "✅ Enable audit logging on all cloud platforms"
+  - "✅ Use environment-specific secrets"
+  - "✅ Enable branch protection rules"
+  - "✅ Require code reviews for production"
+  - "✅ Scan container images for vulnerabilities"
+  - "✅ Use private container registries"
+  - "✅ Enable network policies in Kubernetes"
+  - "✅ Encrypt secrets at rest and in transit"
+
+# ===================================
+# MONITORING SETUP
+# ===================================
+
+monitoring_setup: |
+  
+  # Set up monitoring alerts
+  1. GitHub Actions workflow failure notifications
+  2. Cloud platform resource utilization alerts
+  3. Application health check failures
+  4. Security scan failure alerts
+  5. Cost optimization alerts
+  
+  # Recommended monitoring services:
+  - DataDog, New Relic, or Prometheus for APM
+  - PagerDuty for incident management
+  - Slack/Teams for deployment notifications
+
+# ===================================
+# COST OPTIMIZATION
+# ===================================
+
+cost_optimization: |
+  
+  # Optimize cloud costs:
+  1. Use appropriate instance sizes (avoid over-provisioning)
+  2. Enable auto-scaling to reduce idle resources
+  3. Use spot instances for non-critical workloads
+  4. Set up cost budgets and alerts
+  5. Clean up unused resources regularly
+  6. Use reserved instances for production workloads
+  
+  # Cost estimation:
+  - GCP: ~$50-200/month for staging + production
+  - AWS: ~$60-250/month for staging + production  
+  - Azure: ~$55-220/month for staging + production
+  
+  # Actual costs depend on:
+  - Traffic volume
+  - Data storage requirements
+  - Compute instance types
+  - Network usage
+  - Additional services used 

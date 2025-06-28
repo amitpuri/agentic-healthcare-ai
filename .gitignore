@@ -1,0 +1,94 @@
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.development
+.env.test
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Docker
+docker-compose.override.yml
+.docker/
+
+# Docker volumes - runtime data that shouldn't be committed
+docker/volumes/
+docker/logs/
+
+# UI/Frontend
+ui/node_modules/
+ui/dist/
+ui/build/
+ui/coverage/
+ui/.nyc_output/
+ui/package-lock.json
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Security scanning
+trivy-results.sarif
+*.pem
+*.key
+*.crt
+
+# Monitoring/Logs
+logs/
+monitoring/data/
+grafana/data/
+elasticsearch/data/
+prometheus/data/
+
+# Test artifacts
+test-results/
+.coverage
+htmlcov/
+docker/.env

@@ -1,0 +1,72 @@
+# Development Environment Configuration
+# Extends base.yaml with development-specific overrides
+
+environment: development
+
+# Network configuration for development
+network:
+  host: "localhost"
+  protocol: "http"
+  external_host: "localhost"
+
+# Service URL overrides for local development
+# URLs will be generated dynamically from network.host and service ports
+
+# Development-specific FHIR settings
+fhir:
+  base_url: "https://hapi.fhir.org/baseR4"
+  client_id: "healthcare_ai_dev"
+  enable_test_data: true
+
+# Database configuration
+database:
+  host: "localhost"
+  port: 5432
+  name: "healthcare_ai_dev"
+  username: "postgres"
+  ssl_mode: "disable"
+
+# Redis configuration
+redis:
+  host: "localhost"
+  port: 6379
+  db: 0
+
+# Security relaxed for development
+security:
+  cors:
+    allow_origins: ["http://localhost:3000", "http://localhost:3030"]
+  rate_limiting:
+    enabled: false
+
+# Features enabled for development
+features:
+  mock_data: true
+  debug_mode: true
+  hot_reload: true
+  test_fixtures: true
+
+# Logging for development
+logging:
+  level: "DEBUG"
+  format: "pretty"
+  audit_enabled: false
+
+# Development resource limits
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "100m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+
+# Development scaling
+scaling:
+  replicas: 1
+  auto_scaling: false
+
+# Email configuration (optional for dev)
+email:
+  enabled: false
+  mock_enabled: true 

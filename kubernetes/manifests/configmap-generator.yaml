@@ -1,0 +1,18 @@
+# ConfigMap Generator for Healthcare AI Kubernetes Deployment
+# This generator creates dynamic ConfigMaps based on the centralized configuration system
+# 
+# Usage:
+#   python ../config/config_manager.py --environment production --platform kubernetes --output configmap.yaml
+#
+# This will generate the appropriate ConfigMap with environment-specific settings
+# for Kubernetes deployment using the centralized config system.
+#
+# The generated ConfigMap will include:
+# - Network configuration (NETWORK_HOST, NETWORK_PROTOCOL, etc.)
+# - Service URLs (dynamic based on environment)
+# - Database and Redis configurations
+# - Environment-specific overrides
+#
+# Example command to generate production ConfigMap:
+# cd kubernetes
+# python ../scripts/generate-k8s-configmap.py --environment production 

@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fhir-proxy
+  namespace: healthcare-ai
+  labels:
+    app: fhir-proxy
+    component: proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fhir-proxy
+  template:
+    metadata:
+      labels:
+        app: fhir-proxy
+        component: proxy
+    spec:
+      containers:
+      - name: fhir-proxy
+        image: healthcare-ai/fhir-proxy:latest
+        imagePullPolicy: Never  # For local Docker images
+        ports:
+        - containerPort: 8003
+        env:
+        # Network Configuration - NEW
+        - name: NETWORK_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: NETWORK_HOST
+        - name: NETWORK_PROTOCOL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: NETWORK_PROTOCOL
+        - name: EXTERNAL_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: EXTERNAL_HOST
+        - name: ENVIRONMENT
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: ENVIRONMENT
+        # FHIR Configuration
+        - name: FHIR_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: FHIR_BASE_URL
+        - name: FHIR_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: FHIR_CLIENT_ID
+              optional: true
+        - name: FHIR_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: FHIR_CLIENT_SECRET
+              optional: true
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "250m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8003
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8003
+          initialDelaySeconds: 10
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fhir-proxy
+  namespace: healthcare-ai
+  labels:
+    app: fhir-proxy
+    component: proxy
+spec:
+  selector:
+    app: fhir-proxy
+  ports:
+  - name: http
+    port: 8003
+    targetPort: 8003
+    nodePort: 30083
+  type: NodePort 

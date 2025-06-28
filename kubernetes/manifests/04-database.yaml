@@ -1,0 +1,167 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: healthcare-ai
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: POSTGRES_DB
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: healthcare-ai-config
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: healthcare-ai-secrets
+              key: POSTGRES_PASSWORD
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        - name: init-sql
+          mountPath: /docker-entrypoint-initdb.d
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - healthcare_user
+            - -d
+            - healthcare_ai
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - healthcare_user
+            - -d
+            - healthcare_ai
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+      - name: init-sql
+        configMap:
+          name: postgres-init
+          defaultMode: 0755
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: healthcare-ai
+  labels:
+    app: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: 5432
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: healthcare-ai
+  labels:
+    app: postgres
+data:
+  init.sql: |
+    -- Healthcare AI Database Schema
+    
+    -- Create tables for conversation history
+    CREATE TABLE IF NOT EXISTS conversations (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        patient_id VARCHAR(255) NOT NULL,
+        conversation_type VARCHAR(50) NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'active',
+        framework VARCHAR(20) NOT NULL,
+        participants TEXT[],
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+    
+    -- Create table for messages
+    CREATE TABLE IF NOT EXISTS messages (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        conversation_id UUID REFERENCES conversations(id) ON DELETE CASCADE,
+        speaker VARCHAR(255) NOT NULL,
+        role VARCHAR(20) NOT NULL,
+        content TEXT NOT NULL,
+        metadata JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+    
+    -- Create table for patients (cache)
+    CREATE TABLE IF NOT EXISTS patients (
+        patient_id VARCHAR(255) PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        birth_date DATE,
+        gender VARCHAR(20),
+        phone VARCHAR(50),
+        email VARCHAR(255),
+        conditions JSONB,
+        medications JSONB,
+        allergies JSONB,
+        recent_visits JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+    
+    -- Create table for audit logs
+    CREATE TABLE IF NOT EXISTS audit_logs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        action VARCHAR(100) NOT NULL,
+        user_id VARCHAR(255),
+        patient_id VARCHAR(255),
+        details JSONB,
+        ip_address INET,
+        user_agent TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+    
+    -- Create indexes for better performance
+    CREATE INDEX IF NOT EXISTS idx_conversations_patient_id ON conversations(patient_id);
+    CREATE INDEX IF NOT EXISTS idx_conversations_created_at ON conversations(created_at);
+    CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
+    CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
+    CREATE INDEX IF NOT EXISTS idx_patients_name ON patients(name);
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_patient_id ON audit_logs(patient_id); 

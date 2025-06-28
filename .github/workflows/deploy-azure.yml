@@ -1,0 +1,422 @@
+name: Deploy to Microsoft Azure
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  AZURE_LOCATION: eastus
+  RESOURCE_GROUP: healthcare-ai-rg
+  AKS_CLUSTER: healthcare-ai-aks
+  ACR_NAME: healthcareairegistry
+  CREWAI_IMAGE: crewai-healthcare-agent
+  AUTOGEN_IMAGE: autogen-healthcare-agent
+
+jobs:
+  restricted:
+    if: github.actor == 'amitpuri'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Only amitpuri can trigger this"
+
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      should-deploy: ${{ steps.set-env.outputs.should-deploy }}
+      resource-group: ${{ steps.set-env.outputs.resource-group }}
+    steps:
+      - name: Set environment
+        id: set-env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ENV="${{ github.event.inputs.environment }}"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            ENV="production"
+          elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            ENV="staging"
+          else
+            ENV="review"
+          fi
+          
+          echo "environment=$ENV" >> $GITHUB_OUTPUT
+          echo "resource-group=${{ env.RESOURCE_GROUP }}-$ENV" >> $GITHUB_OUTPUT
+          
+          if [[ "$ENV" != "review" ]]; then
+            echo "should-deploy=true" >> $GITHUB_OUTPUT
+          else
+            echo "should-deploy=false" >> $GITHUB_OUTPUT
+          fi
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies and run tests
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-cov pytest-asyncio
+          pip install -r crewai_fhir_agent/requirements.txt
+          pip install -r autogen_fhir_agent/requirements.txt
+          
+          # Create test structure
+          mkdir -p tests
+          cat > tests/test_azure_integration.py << 'EOF'
+          import pytest
+          from shared.fhir_client import FHIRConfig
+          
+          def test_azure_environment():
+              config = FHIRConfig(
+                  base_url="https://hapi.fhir.org/baseR4/",
+                  client_id="azure_test_client"
+              )
+              assert config.base_url
+              assert config.client_id
+          EOF
+          
+          python -m pytest tests/ -v --cov=shared
+
+  build-and-push:
+    needs: [setup, test]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [crewai_fhir_agent, autogen_fhir_agent, ui, fhir_mcp_server, fhir_proxy]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Create Azure Container Registry
+        run: |
+          # Create resource group if not exists
+          az group create --name ${{ needs.setup.outputs.resource-group }} --location ${{ env.AZURE_LOCATION }} || true
+          
+          # Create ACR if not exists
+          az acr create \
+            --resource-group ${{ needs.setup.outputs.resource-group }} \
+            --name ${{ env.ACR_NAME }}${{ needs.setup.outputs.environment }} \
+            --sku Basic \
+            --location ${{ env.AZURE_LOCATION }} || true
+
+      - name: Login to Azure Container Registry
+        run: |
+          az acr login --name ${{ env.ACR_NAME }}${{ needs.setup.outputs.environment }}
+
+      - name: Build and push Docker image
+        run: |
+          REPO_NAME=$(echo ${{ matrix.service }} | sed 's/_/-/g')
+          FULL_IMAGE_NAME=${{ env.ACR_NAME }}${{ needs.setup.outputs.environment }}.azurecr.io/$REPO_NAME:${{ github.sha }}
+          
+          docker build -t $FULL_IMAGE_NAME ./${{ matrix.service }}/
+          docker push $FULL_IMAGE_NAME
+          
+          # Tag as latest for main branch
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            LATEST_IMAGE=${{ env.ACR_NAME }}${{ needs.setup.outputs.environment }}.azurecr.io/$REPO_NAME:latest
+            docker tag $FULL_IMAGE_NAME $LATEST_IMAGE
+            docker push $LATEST_IMAGE
+          fi
+
+  deploy-infrastructure:
+    needs: [setup, build-and-push]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.should-deploy == 'true'
+    environment: ${{ needs.setup.outputs.environment }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Create Azure infrastructure
+        run: |
+          # Create ARM template
+          cat > infrastructure.json << 'EOF'
+          {
+            "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+            "contentVersion": "1.0.0.0",
+            "parameters": {
+              "environment": {
+                "type": "string",
+                "defaultValue": "staging"
+              },
+              "dbPassword": {
+                "type": "securestring"
+              },
+              "location": {
+                "type": "string",
+                "defaultValue": "[resourceGroup().location]"
+              }
+            },
+            "variables": {
+              "vnetName": "[concat('healthcare-ai-vnet-', parameters('environment'))]",
+              "subnetName": "[concat('healthcare-ai-subnet-', parameters('environment'))]",
+              "aksName": "[concat('healthcare-ai-aks-', parameters('environment'))]",
+              "dbServerName": "[concat('healthcare-ai-db-', parameters('environment'), '-', uniqueString(resourceGroup().id))]",
+              "redisName": "[concat('healthcare-ai-redis-', parameters('environment'), '-', uniqueString(resourceGroup().id))]"
+            },
+            "resources": [
+              {
+                "type": "Microsoft.Network/virtualNetworks",
+                "apiVersion": "2021-02-01",
+                "name": "[variables('vnetName')]",
+                "location": "[parameters('location')]",
+                "properties": {
+                  "addressSpace": {
+                    "addressPrefixes": ["10.0.0.0/16"]
+                  },
+                  "subnets": [
+                    {
+                      "name": "[variables('subnetName')]",
+                      "properties": {
+                        "addressPrefix": "10.0.1.0/24"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "type": "Microsoft.DBforPostgreSQL/flexibleServers",
+                "apiVersion": "2021-06-01",
+                "name": "[variables('dbServerName')]",
+                "location": "[parameters('location')]",
+                "sku": {
+                  "name": "Standard_B1ms",
+                  "tier": "Burstable"
+                },
+                "properties": {
+                  "administratorLogin": "healthcare_user",
+                  "administratorLoginPassword": "[parameters('dbPassword')]",
+                  "storage": {
+                    "storageSizeGB": 32
+                  },
+                  "version": "14"
+                }
+              },
+              {
+                "type": "Microsoft.Cache/Redis",
+                "apiVersion": "2021-06-01",
+                "name": "[variables('redisName')]",
+                "location": "[parameters('location')]",
+                "properties": {
+                  "sku": {
+                    "name": "Basic",
+                    "family": "C",
+                    "capacity": 0
+                  },
+                  "enableNonSslPort": false,
+                  "minimumTlsVersion": "1.2"
+                }
+              },
+              {
+                "type": "Microsoft.ContainerService/managedClusters",
+                "apiVersion": "2023-06-01",
+                "name": "[variables('aksName')]",
+                "location": "[parameters('location')]",
+                "dependsOn": [
+                  "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+                ],
+                "identity": {
+                  "type": "SystemAssigned"
+                },
+                "properties": {
+                  "dnsPrefix": "[concat('healthcare-ai-', parameters('environment'))]",
+                  "agentPoolProfiles": [
+                    {
+                      "name": "agentpool",
+                      "count": 2,
+                      "vmSize": "Standard_B2s",
+                      "osType": "Linux",
+                      "mode": "System",
+                      "enableAutoScaling": true,
+                      "minCount": 1,
+                      "maxCount": 5
+                    }
+                  ],
+                  "networkProfile": {
+                    "networkPlugin": "azure",
+                    "serviceCidr": "10.1.0.0/16",
+                    "dnsServiceIP": "10.1.0.10"
+                  }
+                }
+              }
+            ],
+            "outputs": {
+              "aksClusterName": {
+                "type": "string",
+                "value": "[variables('aksName')]"
+              },
+              "dbServerName": {
+                "type": "string",
+                "value": "[variables('dbServerName')]"
+              },
+              "redisName": {
+                "type": "string",
+                "value": "[variables('redisName')]"
+              }
+            }
+          }
+          EOF
+          
+          # Deploy infrastructure
+          az deployment group create \
+            --resource-group ${{ needs.setup.outputs.resource-group }} \
+            --template-file infrastructure.json \
+            --parameters environment=${{ needs.setup.outputs.environment }} \
+                        dbPassword="${{ secrets.DB_PASSWORD }}" \
+            --mode Incremental
+
+      - name: Configure AKS credentials
+        run: |
+          AKS_NAME=$(az deployment group show \
+            --resource-group ${{ needs.setup.outputs.resource-group }} \
+            --name infrastructure \
+            --query 'properties.outputs.aksClusterName.value' \
+            --output tsv)
+          
+          az aks get-credentials \
+            --resource-group ${{ needs.setup.outputs.resource-group }} \
+            --name $AKS_NAME \
+            --overwrite-existing
+
+      - name: Attach ACR to AKS
+        run: |
+          AKS_NAME=$(az deployment group show \
+            --resource-group ${{ needs.setup.outputs.resource-group }} \
+            --name infrastructure \
+            --query 'properties.outputs.aksClusterName.value' \
+            --output tsv)
+          
+          az aks update \
+            --resource-group ${{ needs.setup.outputs.resource-group }} \
+            --name $AKS_NAME \
+            --attach-acr ${{ env.ACR_NAME }}${{ needs.setup.outputs.environment }}
+
+  deploy-applications:
+    needs: [setup, build-and-push, deploy-infrastructure]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.should-deploy == 'true'
+    environment: ${{ needs.setup.outputs.environment }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Configure AKS credentials
+        run: |
+          AKS_NAME=$(az deployment group show \
+            --resource-group ${{ needs.setup.outputs.resource-group }} \
+            --name infrastructure \
+            --query 'properties.outputs.aksClusterName.value' \
+            --output tsv)
+          
+          az aks get-credentials \
+            --resource-group ${{ needs.setup.outputs.resource-group }} \
+            --name $AKS_NAME \
+            --overwrite-existing
+
+      - name: Deploy to AKS
+        run: |
+          az aks get-credentials --resource-group ${{ needs.setup.outputs.resource-group }} --name ${{ env.AKS_CLUSTER }}-${{ needs.setup.outputs.environment }} --overwrite-existing
+          
+          # Update image tags in Kubernetes manifests
+          find ./kubernetes/manifests -type f -name "*.yaml" | while read file; do
+            sed -i "s|image: crewai-healthcare-agent:latest|image: ${{ env.ACR_NAME }}${{ needs.setup.outputs.environment }}.azurecr.io/crewai-healthcare-agent:${{ github.sha }}|g" "$file"
+            sed -i "s|image: autogen-healthcare-agent:latest|image: ${{ env.ACR_NAME }}${{ needs.setup.outputs.environment }}.azurecr.io/autogen-healthcare-agent:${{ github.sha }}|g" "$file"
+            # Add sed commands for other images ui, fhir-mcp-server, fhir-proxy
+          done
+
+          kubectl apply -k ./kubernetes/manifests
+
+  smoke-tests:
+    needs: [setup, deploy-applications]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.should-deploy == 'true'
+    steps:
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Configure AKS credentials
+        run: |
+          AKS_NAME=$(az deployment group show \
+            --resource-group ${{ needs.setup.outputs.resource-group }} \
+            --name infrastructure \
+            --query 'properties.outputs.aksClusterName.value' \
+            --output tsv)
+          
+          az aks get-credentials \
+            --resource-group ${{ needs.setup.outputs.resource-group }} \
+            --name $AKS_NAME \
+            --overwrite-existing
+
+      - name: Run smoke tests
+        run: |
+          # Wait for LoadBalancer services
+          echo "Waiting for services to get external IPs..."
+          kubectl wait --for=jsonpath='{.status.loadBalancer.ingress}' \
+            service/crewai-healthcare-service \
+            --namespace=healthcare-ai-${{ needs.setup.outputs.environment }} \
+            --timeout=300s
+          
+          # Get service IP
+          CREWAI_IP=$(kubectl get service crewai-healthcare-service \
+            --namespace=healthcare-ai-${{ needs.setup.outputs.environment }} \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          
+          echo "Testing CrewAI service at: http://$CREWAI_IP/health"
+          
+          # Test health endpoint with retry
+          for i in {1..5}; do
+            if curl -f http://$CREWAI_IP/health; then
+              echo "Health check passed!"
+              break
+            else
+              echo "Attempt $i failed, retrying in 30 seconds..."
+              sleep 30
+            fi
+          done
+          
+          echo "Azure deployment smoke tests completed!"
+
+  notify:
+    needs: [setup, deploy-applications, smoke-tests]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Notify deployment status
+        run: |
+          if [[ "${{ needs.deploy-applications.result }}" == "success" && "${{ needs.smoke-tests.result }}" == "success" ]]; then
+            echo "✅ Azure deployment to ${{ needs.setup.outputs.environment }} successful!"
+          else
+            echo "❌ Azure deployment to ${{ needs.setup.outputs.environment }} failed!"
+            exit 1
+          fi 

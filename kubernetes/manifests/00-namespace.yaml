@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: healthcare-ai
+  labels:
+    name: healthcare-ai
+    app: healthcare-ai-system 

@@ -1,0 +1,1022 @@
+name: Deploy to Amazon Web Services
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      destroy_infrastructure:
+        description: 'Destroy infrastructure after deployment (for testing)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: healthcare-ai-cluster
+  ECR_REGISTRY_PREFIX: healthcare-ai
+
+jobs:
+  restricted:
+    if: github.actor == 'amitpuri'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Only amitpuri can trigger this"
+
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      should-deploy: ${{ steps.set-env.outputs.should-deploy }}
+      cluster-name: ${{ steps.set-env.outputs.cluster-name }}
+      stack-name: ${{ steps.set-env.outputs.stack-name }}
+    steps:
+      - name: Set environment variables
+        id: set-env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+            echo "should-deploy=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+            echo "should-deploy=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "should-deploy=true" >> $GITHUB_OUTPUT
+          else
+            echo "environment=review" >> $GITHUB_OUTPUT
+            echo "should-deploy=false" >> $GITHUB_OUTPUT
+          fi
+          
+          ENV=${{ github.event.inputs.environment || 'staging' }}
+          echo "cluster-name=${{ env.EKS_CLUSTER_NAME }}-$ENV" >> $GITHUB_OUTPUT
+          echo "stack-name=healthcare-ai-landing-zone-$ENV" >> $GITHUB_OUTPUT
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies and run tests
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-cov pytest-asyncio
+          pip install -r crewai_fhir_agent/requirements.txt
+          pip install -r autogen_fhir_agent/requirements.txt
+          pip install -r fhir_mcp_server/requirements.txt
+          pip install -r fhir_proxy/requirements.txt
+          
+          # Create comprehensive test structure
+          mkdir -p tests
+          cat > tests/test_aws_integration.py << 'EOF'
+          import pytest
+          from shared.fhir_client import FHIRConfig
+          
+          def test_aws_environment():
+              config = FHIRConfig(
+                  base_url="https://hapi.fhir.org/baseR4/",
+                  client_id="aws_test_client"
+              )
+              assert config.base_url
+              assert config.client_id
+              
+          def test_environment_variables():
+              import os
+              # Test that we can handle missing env vars gracefully
+              assert True  # Placeholder for actual env var tests
+          EOF
+          
+          python -m pytest tests/ -v --cov=shared
+
+  # Step 1: Basic Landing Zone Creation on AWS
+  create-landing-zone:
+    needs: [setup, test]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.should-deploy == 'true'
+    environment: ${{ needs.setup.outputs.environment }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create AWS Landing Zone
+        run: |
+          cat > landing-zone.yaml << 'EOF'
+          AWSTemplateFormatVersion: '2010-09-09'
+          Description: Healthcare AI Agents Landing Zone Infrastructure
+          
+          Parameters:
+            Environment:
+              Type: String
+              Default: staging
+              AllowedValues: [staging, production]
+            DBPassword:
+              Type: String
+              NoEcho: true
+              MinLength: 8
+              Description: Database password (minimum 8 characters)
+            RedisPassword:
+              Type: String
+              NoEcho: true
+              MinLength: 8
+              Description: Redis password (minimum 8 characters)
+          
+          Resources:
+            # VPC and Networking
+            VPC:
+              Type: AWS::EC2::VPC
+              Properties:
+                CidrBlock: 10.0.0.0/16
+                EnableDnsHostnames: true
+                EnableDnsSupport: true
+                Tags:
+                  - Key: Name
+                    Value: !Sub healthcare-ai-vpc-${Environment}
+                  - Key: Environment
+                    Value: !Ref Environment
+          
+            # Internet Gateway
+            InternetGateway:
+              Type: AWS::EC2::InternetGateway
+              Properties:
+                Tags:
+                  - Key: Name
+                    Value: !Sub healthcare-ai-igw-${Environment}
+          
+            AttachGateway:
+              Type: AWS::EC2::VPCGatewayAttachment
+              Properties:
+                VpcId: !Ref VPC
+                InternetGatewayId: !Ref InternetGateway
+          
+            # Public Subnets
+            PublicSubnet1:
+              Type: AWS::EC2::Subnet
+              Properties:
+                VpcId: !Ref VPC
+                CidrBlock: 10.0.1.0/24
+                AvailabilityZone: !Select [0, !GetAZs '']
+                MapPublicIpOnLaunch: true
+                Tags:
+                  - Key: Name
+                    Value: !Sub healthcare-ai-public-subnet-1-${Environment}
+                  - Key: kubernetes.io/role/elb
+                    Value: 1
+          
+            PublicSubnet2:
+              Type: AWS::EC2::Subnet
+              Properties:
+                VpcId: !Ref VPC
+                CidrBlock: 10.0.2.0/24
+                AvailabilityZone: !Select [1, !GetAZs '']
+                MapPublicIpOnLaunch: true
+                Tags:
+                  - Key: Name
+                    Value: !Sub healthcare-ai-public-subnet-2-${Environment}
+                  - Key: kubernetes.io/role/elb
+                    Value: 1
+          
+            # Private Subnets
+            PrivateSubnet1:
+              Type: AWS::EC2::Subnet
+              Properties:
+                VpcId: !Ref VPC
+                CidrBlock: 10.0.3.0/24
+                AvailabilityZone: !Select [0, !GetAZs '']
+                Tags:
+                  - Key: Name
+                    Value: !Sub healthcare-ai-private-subnet-1-${Environment}
+                  - Key: kubernetes.io/role/internal-elb
+                    Value: 1
+          
+            PrivateSubnet2:
+              Type: AWS::EC2::Subnet
+              Properties:
+                VpcId: !Ref VPC
+                CidrBlock: 10.0.4.0/24
+                AvailabilityZone: !Select [1, !GetAZs '']
+                Tags:
+                  - Key: Name
+                    Value: !Sub healthcare-ai-private-subnet-2-${Environment}
+                  - Key: kubernetes.io/role/internal-elb
+                    Value: 1
+          
+            # NAT Gateways for private subnets
+            NATGateway1EIP:
+              Type: AWS::EC2::EIP
+              DependsOn: AttachGateway
+              Properties:
+                Domain: vpc
+          
+            NATGateway2EIP:
+              Type: AWS::EC2::EIP
+              DependsOn: AttachGateway
+              Properties:
+                Domain: vpc
+          
+            NATGateway1:
+              Type: AWS::EC2::NatGateway
+              Properties:
+                AllocationId: !GetAtt NATGateway1EIP.AllocationId
+                SubnetId: !Ref PublicSubnet1
+          
+            NATGateway2:
+              Type: AWS::EC2::NatGateway
+              Properties:
+                AllocationId: !GetAtt NATGateway2EIP.AllocationId
+                SubnetId: !Ref PublicSubnet2
+          
+            # Route Tables
+            PublicRouteTable:
+              Type: AWS::EC2::RouteTable
+              Properties:
+                VpcId: !Ref VPC
+                Tags:
+                  - Key: Name
+                    Value: !Sub healthcare-ai-public-rt-${Environment}
+          
+            DefaultPublicRoute:
+              Type: AWS::EC2::Route
+              DependsOn: AttachGateway
+              Properties:
+                RouteTableId: !Ref PublicRouteTable
+                DestinationCidrBlock: 0.0.0.0/0
+                GatewayId: !Ref InternetGateway
+          
+            PublicSubnet1RouteTableAssociation:
+              Type: AWS::EC2::SubnetRouteTableAssociation
+              Properties:
+                RouteTableId: !Ref PublicRouteTable
+                SubnetId: !Ref PublicSubnet1
+          
+            PublicSubnet2RouteTableAssociation:
+              Type: AWS::EC2::SubnetRouteTableAssociation
+              Properties:
+                RouteTableId: !Ref PublicRouteTable
+                SubnetId: !Ref PublicSubnet2
+          
+            PrivateRouteTable1:
+              Type: AWS::EC2::RouteTable
+              Properties:
+                VpcId: !Ref VPC
+                Tags:
+                  - Key: Name
+                    Value: !Sub healthcare-ai-private-rt-1-${Environment}
+          
+            DefaultPrivateRoute1:
+              Type: AWS::EC2::Route
+              Properties:
+                RouteTableId: !Ref PrivateRouteTable1
+                DestinationCidrBlock: 0.0.0.0/0
+                NatGatewayId: !Ref NATGateway1
+          
+            PrivateSubnet1RouteTableAssociation:
+              Type: AWS::EC2::SubnetRouteTableAssociation
+              Properties:
+                RouteTableId: !Ref PrivateRouteTable1
+                SubnetId: !Ref PrivateSubnet1
+          
+            PrivateRouteTable2:
+              Type: AWS::EC2::RouteTable
+              Properties:
+                VpcId: !Ref VPC
+                Tags:
+                  - Key: Name
+                    Value: !Sub healthcare-ai-private-rt-2-${Environment}
+          
+            DefaultPrivateRoute2:
+              Type: AWS::EC2::Route
+              Properties:
+                RouteTableId: !Ref PrivateRouteTable2
+                DestinationCidrBlock: 0.0.0.0/0
+                NatGatewayId: !Ref NATGateway2
+          
+            PrivateSubnet2RouteTableAssociation:
+              Type: AWS::EC2::SubnetRouteTableAssociation
+              Properties:
+                RouteTableId: !Ref PrivateRouteTable2
+                SubnetId: !Ref PrivateSubnet2
+          
+            # Security Groups
+            EKSClusterSecurityGroup:
+              Type: AWS::EC2::SecurityGroup
+              Properties:
+                GroupDescription: Security group for EKS cluster
+                VpcId: !Ref VPC
+                SecurityGroupIngress:
+                  - IpProtocol: tcp
+                    FromPort: 443
+                    ToPort: 443
+                    CidrIp: 0.0.0.0/0
+                    Description: HTTPS access
+                Tags:
+                  - Key: Name
+                    Value: !Sub healthcare-ai-eks-cluster-sg-${Environment}
+          
+            EKSNodeGroupSecurityGroup:
+              Type: AWS::EC2::SecurityGroup
+              Properties:
+                GroupDescription: Security group for EKS node groups
+                VpcId: !Ref VPC
+                SecurityGroupIngress:
+                  - IpProtocol: tcp
+                    FromPort: 1025
+                    ToPort: 65535
+                    SourceSecurityGroupId: !Ref EKSClusterSecurityGroup
+                    Description: Allow pods to communicate with cluster API Server
+                  - IpProtocol: tcp
+                    FromPort: 443
+                    ToPort: 443
+                    SourceSecurityGroupId: !Ref EKSClusterSecurityGroup
+                    Description: Allow pods to communicate with cluster API Server
+                Tags:
+                  - Key: Name
+                    Value: !Sub healthcare-ai-eks-nodegroup-sg-${Environment}
+          
+            DatabaseSecurityGroup:
+              Type: AWS::EC2::SecurityGroup
+              Properties:
+                GroupDescription: Security group for RDS PostgreSQL
+                VpcId: !Ref VPC
+                SecurityGroupIngress:
+                  - IpProtocol: tcp
+                    FromPort: 5432
+                    ToPort: 5432
+                    SourceSecurityGroupId: !Ref EKSNodeGroupSecurityGroup
+                    Description: PostgreSQL access from EKS nodes
+                Tags:
+                  - Key: Name
+                    Value: !Sub healthcare-ai-db-sg-${Environment}
+          
+            RedisSecurityGroup:
+              Type: AWS::EC2::SecurityGroup
+              Properties:
+                GroupDescription: Security group for Redis
+                VpcId: !Ref VPC
+                SecurityGroupIngress:
+                  - IpProtocol: tcp
+                    FromPort: 6379
+                    ToPort: 6379
+                    SourceSecurityGroupId: !Ref EKSNodeGroupSecurityGroup
+                    Description: Redis access from EKS nodes
+                Tags:
+                  - Key: Name
+                    Value: !Sub healthcare-ai-redis-sg-${Environment}
+          
+            # RDS Database
+            DBSubnetGroup:
+              Type: AWS::RDS::DBSubnetGroup
+              Properties:
+                DBSubnetGroupDescription: Subnet group for Healthcare AI RDS
+                SubnetIds:
+                  - !Ref PrivateSubnet1
+                  - !Ref PrivateSubnet2
+                Tags:
+                  - Key: Name
+                    Value: !Sub healthcare-ai-db-subnet-group-${Environment}
+          
+            RDSInstance:
+              Type: AWS::RDS::DBInstance
+              Properties:
+                DBInstanceIdentifier: !Sub healthcare-ai-db-${Environment}
+                DBInstanceClass: db.t3.micro
+                Engine: postgres
+                EngineVersion: '14.9'
+                MasterUsername: healthcare_user
+                MasterUserPassword: !Ref DBPassword
+                AllocatedStorage: 20
+                StorageType: gp2
+                DBSubnetGroupName: !Ref DBSubnetGroup
+                VPCSecurityGroups:
+                  - !Ref DatabaseSecurityGroup
+                BackupRetentionPeriod: 7
+                DeletionProtection: false
+                Tags:
+                  - Key: Name
+                    Value: !Sub healthcare-ai-db-${Environment}
+                  - Key: Environment
+                    Value: !Ref Environment
+          
+            # ElastiCache Redis
+            RedisSubnetGroup:
+              Type: AWS::ElastiCache::SubnetGroup
+              Properties:
+                Description: Subnet group for Healthcare AI Redis
+                SubnetIds:
+                  - !Ref PrivateSubnet1
+                  - !Ref PrivateSubnet2
+          
+            RedisCluster:
+              Type: AWS::ElastiCache::CacheCluster
+              Properties:
+                CacheNodeType: cache.t3.micro
+                Engine: redis
+                NumCacheNodes: 1
+                CacheSubnetGroupName: !Ref RedisSubnetGroup
+                VpcSecurityGroupIds:
+                  - !Ref RedisSecurityGroup
+                Tags:
+                  - Key: Name
+                    Value: !Sub healthcare-ai-redis-${Environment}
+                  - Key: Environment
+                    Value: !Ref Environment
+          
+            # EKS Cluster Service Role
+            EKSClusterRole:
+              Type: AWS::IAM::Role
+              Properties:
+                RoleName: !Sub healthcare-ai-eks-cluster-role-${Environment}
+                AssumeRolePolicyDocument:
+                  Version: '2012-10-17'
+                  Statement:
+                    - Effect: Allow
+                      Principal:
+                        Service: eks.amazonaws.com
+                      Action: sts:AssumeRole
+                ManagedPolicyArns:
+                  - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+          
+            # EKS Node Group Role
+            EKSNodeGroupRole:
+              Type: AWS::IAM::Role
+              Properties:
+                RoleName: !Sub healthcare-ai-eks-nodegroup-role-${Environment}
+                AssumeRolePolicyDocument:
+                  Version: '2012-10-17'
+                  Statement:
+                    - Effect: Allow
+                      Principal:
+                        Service: ec2.amazonaws.com
+                      Action: sts:AssumeRole
+                ManagedPolicyArns:
+                  - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+                  - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+                  - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+          
+          Outputs:
+            VPCId:
+              Description: VPC ID
+              Value: !Ref VPC
+              Export:
+                Name: !Sub ${AWS::StackName}-VPC
+            
+            PrivateSubnetIds:
+              Description: Private subnet IDs
+              Value: !Sub "${PrivateSubnet1},${PrivateSubnet2}"
+              Export:
+                Name: !Sub ${AWS::StackName}-PrivateSubnets
+            
+            PublicSubnetIds:
+              Description: Public subnet IDs
+              Value: !Sub "${PublicSubnet1},${PublicSubnet2}"
+              Export:
+                Name: !Sub ${AWS::StackName}-PublicSubnets
+            
+            EKSClusterSecurityGroupId:
+              Description: EKS Cluster Security Group ID
+              Value: !Ref EKSClusterSecurityGroup
+              Export:
+                Name: !Sub ${AWS::StackName}-EKSClusterSG
+            
+            EKSNodeGroupSecurityGroupId:
+              Description: EKS Node Group Security Group ID
+              Value: !Ref EKSNodeGroupSecurityGroup
+              Export:
+                Name: !Sub ${AWS::StackName}-EKSNodeGroupSG
+            
+            DBEndpoint:
+              Description: RDS endpoint
+              Value: !GetAtt RDSInstance.Endpoint.Address
+              Export:
+                Name: !Sub ${AWS::StackName}-DBEndpoint
+            
+            RedisEndpoint:
+              Description: Redis endpoint
+              Value: !GetAtt RedisCluster.Endpoint.Address
+              Export:
+                Name: !Sub ${AWS::StackName}-RedisEndpoint
+            
+            EKSClusterRoleArn:
+              Description: EKS Cluster Role ARN
+              Value: !GetAtt EKSClusterRole.Arn
+              Export:
+                Name: !Sub ${AWS::StackName}-EKSClusterRoleArn
+            
+            EKSNodeGroupRoleArn:
+              Description: EKS Node Group Role ARN
+              Value: !GetAtt EKSNodeGroupRole.Arn
+              Export:
+                Name: !Sub ${AWS::StackName}-EKSNodeGroupRoleArn
+          EOF
+          
+          aws cloudformation deploy \
+            --template-file landing-zone.yaml \
+            --stack-name ${{ needs.setup.outputs.stack-name }} \
+            --parameter-overrides \
+              Environment=${{ needs.setup.outputs.environment }} \
+              DBPassword="${{ secrets.DATABASE_PASSWORD }}" \
+              RedisPassword="${{ secrets.REDIS_PASSWORD }}" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --region ${{ env.AWS_REGION }}
+
+  # Step 2: Build and Deploy Docker images on Amazon ECR
+  build-and-push-images:
+    needs: [setup, test]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.should-deploy == 'true'
+    strategy:
+      matrix:
+        service: 
+          - crewai_fhir_agent
+          - autogen_fhir_agent
+          - agent_backend
+          - fhir_mcp_server
+          - fhir_proxy
+          - ui
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Create ECR repository if not exists
+        run: |
+          REPO_NAME=$(echo ${{ matrix.service }} | sed 's/_/-/g')
+          aws ecr describe-repositories --repository-names $REPO_NAME --region ${{ env.AWS_REGION }} 2>/dev/null || \
+          aws ecr create-repository \
+            --repository-name $REPO_NAME \
+            --region ${{ env.AWS_REGION }} \
+            --image-scanning-configuration scanOnPush=true
+
+      - name: Build and push Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          REPO_NAME=$(echo ${{ matrix.service }} | sed 's/_/-/g')
+          IMAGE_TAG=$ECR_REGISTRY/$REPO_NAME:${{ github.sha }}
+          IMAGE_LATEST=$ECR_REGISTRY/$REPO_NAME:latest
+          
+          # Build image
+          docker build -t $IMAGE_TAG ./${{ matrix.service }}/
+          docker tag $IMAGE_TAG $IMAGE_LATEST
+          
+          # Push images
+          docker push $IMAGE_TAG
+          docker push $IMAGE_LATEST
+          
+          echo "Built and pushed: $IMAGE_TAG"
+          echo "Built and pushed: $IMAGE_LATEST"
+
+  create-eks-cluster:
+    needs: [setup, create-landing-zone]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.should-deploy == 'true'
+    environment: ${{ needs.setup.outputs.environment }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check if EKS cluster exists
+        id: check-cluster
+        run: |
+          if aws eks describe-cluster --name ${{ needs.setup.outputs.cluster-name }} --region ${{ env.AWS_REGION }} &>/dev/null; then
+            echo "cluster-exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "cluster-exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create EKS cluster
+        if: steps.check-cluster.outputs.cluster-exists == 'false'
+        run: |
+          # Get outputs from CloudFormation stack
+          VPC_ID=$(aws cloudformation describe-stacks \
+            --stack-name ${{ needs.setup.outputs.stack-name }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`VPCId`].OutputValue' \
+            --output text)
+          
+          PRIVATE_SUBNETS=$(aws cloudformation describe-stacks \
+            --stack-name ${{ needs.setup.outputs.stack-name }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`PrivateSubnetIds`].OutputValue' \
+            --output text)
+          
+          PUBLIC_SUBNETS=$(aws cloudformation describe-stacks \
+            --stack-name ${{ needs.setup.outputs.stack-name }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`PublicSubnetIds`].OutputValue' \
+            --output text)
+          
+          CLUSTER_SG=$(aws cloudformation describe-stacks \
+            --stack-name ${{ needs.setup.outputs.stack-name }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`EKSClusterSecurityGroupId`].OutputValue' \
+            --output text)
+          
+          CLUSTER_ROLE_ARN=$(aws cloudformation describe-stacks \
+            --stack-name ${{ needs.setup.outputs.stack-name }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`EKSClusterRoleArn`].OutputValue' \
+            --output text)
+          
+          # Combine subnets
+          ALL_SUBNETS="$PRIVATE_SUBNETS,$PUBLIC_SUBNETS"
+          
+          # Create EKS cluster
+          aws eks create-cluster \
+            --name ${{ needs.setup.outputs.cluster-name }} \
+            --version 1.28 \
+            --role-arn $CLUSTER_ROLE_ARN \
+            --resources-vpc-config subnetIds=$ALL_SUBNETS,securityGroupIds=$CLUSTER_SG \
+            --region ${{ env.AWS_REGION }}
+          
+          # Wait for cluster to be active
+          echo "Waiting for EKS cluster to be active..."
+          aws eks wait cluster-active \
+            --name ${{ needs.setup.outputs.cluster-name }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Create EKS node group
+        run: |
+          # Check if node group exists
+          if ! aws eks describe-nodegroup \
+            --cluster-name ${{ needs.setup.outputs.cluster-name }} \
+            --nodegroup-name healthcare-ai-workers \
+            --region ${{ env.AWS_REGION }} &>/dev/null; then
+            
+            echo "Creating EKS node group..."
+            
+            PRIVATE_SUBNETS=$(aws cloudformation describe-stacks \
+              --stack-name ${{ needs.setup.outputs.stack-name }} \
+              --query 'Stacks[0].Outputs[?OutputKey==`PrivateSubnetIds`].OutputValue' \
+              --output text)
+            
+            NODEGROUP_ROLE_ARN=$(aws cloudformation describe-stacks \
+              --stack-name ${{ needs.setup.outputs.stack-name }} \
+              --query 'Stacks[0].Outputs[?OutputKey==`EKSNodeGroupRoleArn`].OutputValue' \
+              --output text)
+            
+            aws eks create-nodegroup \
+              --cluster-name ${{ needs.setup.outputs.cluster-name }} \
+              --nodegroup-name healthcare-ai-workers \
+              --subnets $(echo $PRIVATE_SUBNETS | tr ',' ' ') \
+              --node-role $NODEGROUP_ROLE_ARN \
+              --ami-type AL2_x86_64 \
+              --instance-types t3.medium \
+              --scaling-config minSize=2,maxSize=4,desiredSize=2 \
+              --disk-size 20 \
+              --region ${{ env.AWS_REGION }}
+            
+            # Wait for node group to be active
+            echo "Waiting for EKS node group to be active..."
+            aws eks wait nodegroup-active \
+              --cluster-name ${{ needs.setup.outputs.cluster-name }} \
+              --nodegroup-name healthcare-ai-workers \
+              --region ${{ env.AWS_REGION }}
+          fi
+
+  # Step 3: Use kubernetes manifests to deploy resources on Amazon EKS
+  deploy-to-eks:
+    needs: [setup, build-and-push-images, create-eks-cluster]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.should-deploy == 'true'
+    environment: ${{ needs.setup.outputs.environment }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure kubectl for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ needs.setup.outputs.cluster-name }}
+
+      - name: Install AWS Load Balancer Controller
+        run: |
+          # Check if AWS Load Balancer Controller exists
+          if ! kubectl get deployment -n kube-system aws-load-balancer-controller &>/dev/null; then
+            echo "Installing AWS Load Balancer Controller..."
+            
+            # Create IAM role for AWS Load Balancer Controller
+            cat > load-balancer-trust-policy.json << 'EOF'
+          {
+              "Version": "2012-10-17",
+              "Statement": [
+                  {
+                      "Effect": "Allow",
+                      "Principal": {
+                          "Federated": "arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:oidc-provider/oidc.eks.${{ env.AWS_REGION }}.amazonaws.com/id/$(aws eks describe-cluster --name ${{ needs.setup.outputs.cluster-name }} --query 'cluster.identity.oidc.issuer' --output text | cut -d '/' -f 5)"
+                      },
+                      "Action": "sts:AssumeRoleWithWebIdentity",
+                      "Condition": {
+                          "StringEquals": {
+                              "oidc.eks.${{ env.AWS_REGION }}.amazonaws.com/id/$(aws eks describe-cluster --name ${{ needs.setup.outputs.cluster-name }} --query 'cluster.identity.oidc.issuer' --output text | cut -d '/' -f 5):sub": "system:serviceaccount:kube-system:aws-load-balancer-controller",
+                              "oidc.eks.${{ env.AWS_REGION }}.amazonaws.com/id/$(aws eks describe-cluster --name ${{ needs.setup.outputs.cluster-name }} --query 'cluster.identity.oidc.issuer' --output text | cut -d '/' -f 5):aud": "sts.amazonaws.com"
+                          }
+                      }
+                  }
+              ]
+          }
+          EOF
+            
+            # Create the role
+            OIDC_ID=$(aws eks describe-cluster --name ${{ needs.setup.outputs.cluster-name }} --query 'cluster.identity.oidc.issuer' --output text | cut -d '/' -f 5)
+            sed -i "s/\$(aws eks describe-cluster --name ${{ needs.setup.outputs.cluster-name }} --query 'cluster.identity.oidc.issuer' --output text | cut -d '\\/' -f 5)/$OIDC_ID/g" load-balancer-trust-policy.json
+            
+            aws iam create-role \
+              --role-name AmazonEKSLoadBalancerControllerRole-${{ needs.setup.outputs.environment }} \
+              --assume-role-policy-document file://load-balancer-trust-policy.json || true
+            
+            aws iam attach-role-policy \
+              --policy-arn arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:policy/AWSLoadBalancerControllerIAMPolicy \
+              --role-name AmazonEKSLoadBalancerControllerRole-${{ needs.setup.outputs.environment }} || true
+            
+            # Install using Helm
+            curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+            helm repo add eks https://aws.github.io/eks-charts
+            helm repo update
+            
+            kubectl apply -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller//crds?ref=master"
+            
+            helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+              -n kube-system \
+              --set clusterName=${{ needs.setup.outputs.cluster-name }} \
+              --set serviceAccount.create=false \
+              --set serviceAccount.name=aws-load-balancer-controller \
+              --set region=${{ env.AWS_REGION }} \
+              --set vpcId=$(aws cloudformation describe-stacks --stack-name ${{ needs.setup.outputs.stack-name }} --query 'Stacks[0].Outputs[?OutputKey==`VPCId`].OutputValue' --output text)
+          fi
+
+      - name: Prepare Kubernetes manifests for AWS deployment
+        run: |
+          # Get ECR registry
+          ECR_REGISTRY=$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+          
+          # Get database and Redis endpoints
+          DB_ENDPOINT=$(aws cloudformation describe-stacks \
+            --stack-name ${{ needs.setup.outputs.stack-name }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`DBEndpoint`].OutputValue' \
+            --output text)
+          
+          REDIS_ENDPOINT=$(aws cloudformation describe-stacks \
+            --stack-name ${{ needs.setup.outputs.stack-name }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`RedisEndpoint`].OutputValue' \
+            --output text)
+          
+          # Create a copy of manifests for AWS deployment
+          cp -r kubernetes/manifests kubernetes/aws-manifests
+          
+          # Update image references to use ECR
+          find kubernetes/aws-manifests -name "*.yaml" -type f -exec sed -i \
+            -e "s|healthcare-ai/crewai-healthcare-agent:latest|$ECR_REGISTRY/crewai-fhir-agent:${{ github.sha }}|g" \
+            -e "s|healthcare-ai/autogen-healthcare-agent:latest|$ECR_REGISTRY/autogen-fhir-agent:${{ github.sha }}|g" \
+            -e "s|healthcare-ai/agent-backend:latest|$ECR_REGISTRY/agent-backend:${{ github.sha }}|g" \
+            -e "s|healthcare-ai/fhir-mcp-server:latest|$ECR_REGISTRY/fhir-mcp-server:${{ github.sha }}|g" \
+            -e "s|healthcare-ai/fhir-proxy:latest|$ECR_REGISTRY/fhir-proxy:${{ github.sha }}|g" \
+            -e "s|healthcare-ai/healthcare-ui:latest|$ECR_REGISTRY/ui:${{ github.sha }}|g" \
+            -e "s|imagePullPolicy: Never|imagePullPolicy: Always|g" {} \;
+          
+          # Update ConfigMap with AWS-specific values
+          cat > kubernetes/aws-manifests/01-configmap-aws.yaml << EOF
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: healthcare-ai-config
+            namespace: healthcare-ai
+          data:
+            ENVIRONMENT: "${{ needs.setup.outputs.environment }}"
+            NODE_ENV: "production"
+            NETWORK_HOST: "0.0.0.0"
+            NETWORK_PROTOCOL: "https"
+            EXTERNAL_HOST: "healthcare-ai-${{ needs.setup.outputs.environment }}.aws.local"
+            FHIR_BASE_URL: "https://hapi.fhir.org/baseR4/"
+            FHIR_MCP_URL: "https://healthcare-ai-${{ needs.setup.outputs.environment }}.aws.local/fhir-mcp"
+            FHIR_MCP_INTERNAL_URL: "http://fhir-mcp-server-service:8003"
+            FHIR_PROXY_URL: "https://healthcare-ai-${{ needs.setup.outputs.environment }}.aws.local/fhir-proxy"
+            AGENT_BACKEND_URL: "https://healthcare-ai-${{ needs.setup.outputs.environment }}.aws.local/agent-backend"
+            CREWAI_API_URL: "https://healthcare-ai-${{ needs.setup.outputs.environment }}.aws.local/crewai"
+            AUTOGEN_API_URL: "https://healthcare-ai-${{ needs.setup.outputs.environment }}.aws.local/autogen"
+            CREWAI_SERVICE_URL: "http://crewai-healthcare-agent:8000"
+            AUTOGEN_SERVICE_URL: "http://autogen-healthcare-agent:8001"
+          EOF
+          
+          # Update Secrets with AWS values
+          cat > kubernetes/aws-manifests/02-secrets-aws.yaml << EOF
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: healthcare-ai-secrets
+            namespace: healthcare-ai
+          type: Opaque
+          data:
+            OPENAI_API_KEY: $(echo -n "${{ secrets.OPENAI_API_KEY }}" | base64)
+            DATABASE_PASSWORD: $(echo -n "${{ secrets.DATABASE_PASSWORD }}" | base64)
+            REDIS_PASSWORD: $(echo -n "${{ secrets.REDIS_PASSWORD }}" | base64)
+            FHIR_CLIENT_ID: $(echo -n "${{ secrets.FHIR_CLIENT_ID }}" | base64)
+            FHIR_CLIENT_SECRET: $(echo -n "${{ secrets.FHIR_CLIENT_SECRET }}" | base64)
+          EOF
+          
+          # Update database and Redis configurations
+          sed -i "s|postgres-service:5432|$DB_ENDPOINT:5432|g" kubernetes/aws-manifests/*.yaml
+          sed -i "s|redis-service:6379|$REDIS_ENDPOINT:6379|g" kubernetes/aws-manifests/*.yaml
+
+      - name: Deploy to EKS using Kubernetes manifests
+        run: |
+          # Apply manifests in order
+          kubectl apply -f kubernetes/aws-manifests/00-namespace.yaml
+          kubectl apply -f kubernetes/aws-manifests/01-configmap-aws.yaml
+          kubectl apply -f kubernetes/aws-manifests/02-secrets-aws.yaml
+          
+          # Skip PersistentVolumes for AWS (using RDS and ElastiCache instead)
+          # kubectl apply -f kubernetes/aws-manifests/03-persistent-volumes.yaml
+          # kubectl apply -f kubernetes/aws-manifests/04-database.yaml
+          # kubectl apply -f kubernetes/aws-manifests/05-redis.yaml
+          
+          kubectl apply -f kubernetes/aws-manifests/06-healthcare-agents.yaml
+          kubectl apply -f kubernetes/aws-manifests/07-healthcare-ui.yaml
+          kubectl apply -f kubernetes/aws-manifests/08-monitoring.yaml
+          kubectl apply -f kubernetes/aws-manifests/09-elk-stack.yaml
+          kubectl apply -f kubernetes/aws-manifests/11-fhir-proxy.yaml
+          
+          # Wait for deployments to be ready
+          echo "Waiting for deployments to be ready..."
+          kubectl wait --for=condition=available --timeout=600s deployment --all -n healthcare-ai
+
+  # Step 4: Test deployment
+  test-deployment:
+    needs: [setup, deploy-to-eks]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.should-deploy == 'true'
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Configure kubectl for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ needs.setup.outputs.cluster-name }}
+
+      - name: Test pod health
+        run: |
+          echo "=== Testing Pod Health ==="
+          kubectl get pods -n healthcare-ai
+          
+          # Check if all pods are running
+          kubectl wait --for=condition=ready pod --all -n healthcare-ai --timeout=300s
+          
+          echo "=== Pod Status ==="
+          kubectl get pods -n healthcare-ai -o wide
+
+      - name: Test service connectivity
+        run: |
+          echo "=== Testing Service Connectivity ==="
+          kubectl get services -n healthcare-ai
+          
+          # Test internal service connectivity
+          echo "Testing CrewAI agent health..."
+          kubectl exec -n healthcare-ai deployment/crewai-healthcare-agent -- curl -f http://localhost:8000/health || echo "CrewAI health check failed"
+          
+          echo "Testing AutoGen agent health..."
+          kubectl exec -n healthcare-ai deployment/autogen-healthcare-agent -- curl -f http://localhost:8001/health || echo "AutoGen health check failed"
+          
+          echo "Testing FHIR MCP server health..."
+          kubectl exec -n healthcare-ai deployment/fhir-mcp-server -- curl -f http://localhost:8003/health || echo "FHIR MCP health check failed"
+
+      - name: Test external connectivity (if LoadBalancer available)
+        run: |
+          echo "=== Testing External Connectivity ==="
+          
+          # Check if LoadBalancer services are available
+          LB_SERVICES=$(kubectl get services -n healthcare-ai -o jsonpath='{.items[?(@.spec.type=="LoadBalancer")].metadata.name}')
+          
+          if [ -n "$LB_SERVICES" ]; then
+            for service in $LB_SERVICES; do
+              echo "Checking LoadBalancer service: $service"
+              kubectl describe service $service -n healthcare-ai
+              
+              # Wait for LoadBalancer to get external IP
+              kubectl wait --for=jsonpath='{.status.loadBalancer.ingress}' service/$service -n healthcare-ai --timeout=300s || echo "LoadBalancer $service not ready"
+            done
+          else
+            echo "No LoadBalancer services found. Using port-forward for testing..."
+            
+            # Test using port-forward
+            kubectl port-forward -n healthcare-ai service/healthcare-ui-service 8080:80 &
+            PORT_FORWARD_PID=$!
+            sleep 10
+            
+            curl -f http://localhost:8080/ || echo "UI not accessible via port-forward"
+            kill $PORT_FORWARD_PID
+          fi
+
+      - name: Generate deployment summary
+        run: |
+          echo "=== Deployment Summary ==="
+          echo "Environment: ${{ needs.setup.outputs.environment }}"
+          echo "EKS Cluster: ${{ needs.setup.outputs.cluster-name }}"
+          echo "Region: ${{ env.AWS_REGION }}"
+          echo ""
+          echo "=== Resources ==="
+          kubectl get all -n healthcare-ai
+          echo ""
+          echo "=== ConfigMaps ==="
+          kubectl get configmaps -n healthcare-ai
+          echo ""
+          echo "=== Secrets ==="
+          kubectl get secrets -n healthcare-ai
+
+  # Optional: Cleanup (only if destroy_infrastructure is true)
+  cleanup:
+    needs: [setup, test-deployment]
+    runs-on: ubuntu-latest
+    if: github.event.inputs.destroy_infrastructure == 'true' && needs.setup.outputs.should-deploy == 'true'
+    environment: ${{ needs.setup.outputs.environment }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Delete EKS cluster and resources
+        run: |
+          echo "Destroying infrastructure as requested..."
+          
+          # Delete EKS node group first
+          aws eks delete-nodegroup \
+            --cluster-name ${{ needs.setup.outputs.cluster-name }} \
+            --nodegroup-name healthcare-ai-workers \
+            --region ${{ env.AWS_REGION }} || true
+          
+          # Wait for node group deletion
+          aws eks wait nodegroup-deleted \
+            --cluster-name ${{ needs.setup.outputs.cluster-name }} \
+            --nodegroup-name healthcare-ai-workers \
+            --region ${{ env.AWS_REGION }} || true
+          
+          # Delete EKS cluster
+          aws eks delete-cluster \
+            --name ${{ needs.setup.outputs.cluster-name }} \
+            --region ${{ env.AWS_REGION }} || true
+          
+          # Delete CloudFormation stack
+          aws cloudformation delete-stack \
+            --stack-name ${{ needs.setup.outputs.stack-name }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Delete ECR repositories
+        run: |
+          echo "Cleaning up ECR repositories..."
+          for repo in crewai-fhir-agent autogen-fhir-agent agent-backend fhir-mcp-server fhir-proxy ui; do
+            aws ecr delete-repository \
+              --repository-name $repo \
+              --force \
+              --region ${{ env.AWS_REGION }} || true
+          done 

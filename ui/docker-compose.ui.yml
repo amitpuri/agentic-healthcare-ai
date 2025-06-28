@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  healthcare-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    environment:
+      - NODE_ENV=production
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - crewai-service
+      - autogen-service
+    networks:
+      - healthcare-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # CrewAI Service
+  crewai-service:
+    build:
+      context: ../crewai_fhir_agent
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - FHIR_BASE_URL=${FHIR_BASE_URL:-https://hapi.fhir.org/baseR4/}
+      - FHIR_CLIENT_ID=${FHIR_CLIENT_ID:-agentic-healthcare-ai }
+    volumes:
+      - ../shared:/app/shared:ro
+    networks:
+      - healthcare-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Autogen Service
+  autogen-service:
+    build:
+      context: ../autogen_fhir_agent
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - FHIR_BASE_URL=${FHIR_BASE_URL:-https://hapi.fhir.org/baseR4/}
+      - FHIR_CLIENT_ID=${FHIR_CLIENT_ID:-agentic-healthcare-ai }
+    volumes:
+      - ../shared:/app/shared:ro
+    networks:
+      - healthcare-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  healthcare-network:
+    driver: bridge 
