@@ -113,14 +113,14 @@ environments:
 # FHIR Configuration Templates
 fhir:
   default:
-    base_url: "https://hapi.fhir.org/baseR4"
+    base_url: "http://localhost:8080/fhir"
     version: "R4"
     timeout: 30
     max_retries: 3
     
   providers:
     hapi_public:
-      base_url: "https://hapi.fhir.org/baseR4"
+      base_url: "http://localhost:8080/fhir"
       description: "Public HAPI FHIR server for testing"
       
     smart_health_it:

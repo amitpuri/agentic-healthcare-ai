@@ -141,7 +141,7 @@ async def startup_event():
     try:
         # Configure FHIR client
         fhir_config = FHIRConfig(
-            base_url=os.getenv("FHIR_BASE_URL", "https://hapi.fhir.org/baseR4/"),
+            base_url=os.getenv("FHIR_BASE_URL", "http://localhost:8080/fhir/"),
             client_id=os.getenv("FHIR_CLIENT_ID", "healthcare_ai_agent"),
             client_secret=os.getenv("FHIR_CLIENT_SECRET"),
             scopes=["patient/*.read", "user/*.read", "offline_access"]

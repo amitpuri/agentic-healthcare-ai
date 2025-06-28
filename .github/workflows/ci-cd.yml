@@ -121,7 +121,7 @@ jobs:
       run: pytest tests/ -v --cov=. --cov-report=xml
       env:
         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY_TEST }}
-        FHIR_BASE_URL: https://hapi.fhir.org/baseR4/
+        FHIR_BASE_URL: http://localhost:8080/fhir/
     
     - name: Upload coverage reports
       uses: codecov/codecov-action@v3
@@ -173,7 +173,7 @@ jobs:
       run: pytest tests/ -v --cov=. --cov-report=xml
       env:
         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY_TEST }}
-        FHIR_BASE_URL: https://hapi.fhir.org/baseR4/
+        FHIR_BASE_URL: http://localhost:8080/fhir/
     
     - name: Upload coverage reports
       uses: codecov/codecov-action@v3

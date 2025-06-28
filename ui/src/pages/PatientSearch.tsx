@@ -493,7 +493,7 @@ const PatientSearch: React.FC = () => {
 
                   <Box sx={{ bgcolor: 'grey.50', p: 2, borderRadius: 1 }}>
                     <Typography variant="caption" color="text.secondary">
-                      <strong>FHIR Server:</strong> {process.env.REACT_APP_FHIR_BASE_URL || 'https://hapi.fhir.org/baseR4'}
+                      <strong>FHIR Server:</strong> {process.env.REACT_APP_FHIR_BASE_URL || 'http://localhost:8080/fhir'}
                     </Typography>
                   </Box>
                 </Box>

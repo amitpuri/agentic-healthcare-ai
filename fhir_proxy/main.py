@@ -22,7 +22,7 @@ app.add_middleware(
 )
 
 # Default FHIR server
-DEFAULT_FHIR_URL = "https://hapi.fhir.org/baseR4"
+DEFAULT_FHIR_URL = "http://localhost:8080/fhir"
 
 def normalize_fhir_url(url: str) -> str:
     """Normalize FHIR URL by removing trailing slash to prevent double slash issues"""

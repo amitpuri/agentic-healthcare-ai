@@ -78,7 +78,7 @@ const Settings: React.FC = () => {
     multiAgentMode: true,
     responseTimeout: 30,
     maxConversationLength: 100,
-    fhirServerUrl: 'https://hapi.fhir.org/baseR4',
+    fhirServerUrl: process.env.REACT_APP_FHIR_BASE_URL || 'http://localhost:8080/fhir',
     fhirClientId: 'agentic-healthcare-ai ',
     enableSmartAuth: true,
     useFhirMcp: true,
@@ -189,7 +189,7 @@ const Settings: React.FC = () => {
         multiAgentMode: true,
         responseTimeout: 30,
         maxConversationLength: 100,
-        fhirServerUrl: 'https://hapi.fhir.org/baseR4',
+        fhirServerUrl: process.env.REACT_APP_FHIR_BASE_URL || 'http://localhost:8080/fhir',
         fhirClientId: 'agentic-healthcare-ai ',
         enableSmartAuth: true,
         useFhirMcp: true,
@@ -275,7 +275,7 @@ const Settings: React.FC = () => {
       
       // Try predefined patient IDs first, then fallback to getting available ones
       setMcpTestMessage('Trying predefined patient IDs...');
-      const predefinedPatientIds = ['597179', '597217', '597213', '597173', '597220'];
+      const predefinedPatientIds = ['102'];
       let patientData = null;
       let firstPatientId = null;
       let triedPatientIds = [];

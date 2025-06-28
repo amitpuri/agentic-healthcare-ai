@@ -12,7 +12,7 @@ services:
       - "8000:8002"
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - FHIR_SERVER_URL=${FHIR_SERVER_URL:-https://hapi.fhir.org/baseR4}
+      - FHIR_SERVER_URL=${FHIR_SERVER_URL:-http://localhost:8080/fhir}
       - FHIR_AUTH_TOKEN=${FHIR_AUTH_TOKEN}
       - WEBHOOK_URL=${WEBHOOK_URL}
       - PYTHONPATH=/app:/app/shared:/app/autogen_fhir_agent:/app/crewai_fhir_agent

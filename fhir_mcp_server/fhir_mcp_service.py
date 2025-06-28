@@ -25,7 +25,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # Configuration from environment variables
-FHIR_BASE_URL = os.getenv('FHIR_MCP_FHIR__BASE_URL', 'https://hapi.fhir.org/baseR4')
+FHIR_BASE_URL = os.getenv('FHIR_MCP_FHIR__BASE_URL', 'http://localhost:8080/fhir')
 FHIR_ACCESS_TOKEN = os.getenv('FHIR_MCP_FHIR__ACCESS_TOKEN', '')
 MCP_HOST = os.getenv('FHIR_MCP_HOST', '0.0.0.0')
 MCP_PORT = int(os.getenv('FHIR_MCP_PORT', '8004'))

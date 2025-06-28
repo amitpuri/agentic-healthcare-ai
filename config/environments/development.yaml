@@ -14,7 +14,7 @@ network:
 
 # Development-specific FHIR settings
 fhir:
-  base_url: "https://hapi.fhir.org/baseR4"
+  base_url: "http://localhost:8080/fhir"
   client_id: "healthcare_ai_dev"
   enable_test_data: true
 

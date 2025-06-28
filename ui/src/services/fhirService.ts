@@ -127,7 +127,7 @@ class FHIRService {
     
     // Get FHIR server URL from saved settings, environment, or use default
     const savedFhirUrl = localStorage.getItem('REACT_APP_FHIR_BASE_URL');
-    this.fhirServerUrl = savedFhirUrl || process.env.REACT_APP_FHIR_BASE_URL || 'https://hapi.fhir.org/baseR4';
+    this.fhirServerUrl = savedFhirUrl || process.env.REACT_APP_FHIR_BASE_URL || 'http://localhost:8080/fhir';
     
     // Check if MCP should be used (can be toggled in settings)
     // Default to true if not explicitly set to false

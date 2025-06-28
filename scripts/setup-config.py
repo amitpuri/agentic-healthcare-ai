@@ -86,7 +86,7 @@ class ConfigSetup:
         fhir_choice = input("Select FHIR server [1]: ").strip() or "1"
         
         if fhir_choice == "1":
-            fhir_base_url = "https://hapi.fhir.org/baseR4"
+            fhir_base_url = "http://localhost:8080/fhir"
             fhir_client_id = "healthcare_ai_agent"
         elif fhir_choice == "2":
             fhir_base_url = "https://r4.smarthealthit.org"
@@ -177,7 +177,7 @@ class ConfigSetup:
             "app_name": "healthcare-ai",
             "network_host": "localhost" if environment == "development" else os.getenv("EXTERNAL_HOST", ""),
             "protocol": "http" if environment == "development" else "https",
-            "fhir_base_url": "https://hapi.fhir.org/baseR4",
+            "fhir_base_url": "http://localhost:8080/fhir",
             "fhir_client_id": "healthcare_ai_agent",
             "openai_key": os.getenv("OPENAI_API_KEY", ""),
             "db_password": "postgres" if environment == "development" else os.getenv("DATABASE_PASSWORD", ""),

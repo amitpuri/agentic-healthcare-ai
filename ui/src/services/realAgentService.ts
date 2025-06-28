@@ -104,7 +104,7 @@ class RealAgentService {
     this.config = {
       framework: 'autogen',
       apiKey: apiKey,
-      fhirServerUrl: 'https://hapi.fhir.org/baseR4',
+      fhirServerUrl: 'http://localhost:8080/fhir',
       modelName: 'gpt-4',
       temperature: 0.1
     };

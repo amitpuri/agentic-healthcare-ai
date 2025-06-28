@@ -86,7 +86,7 @@ jobs:
           
           def test_aws_environment():
               config = FHIRConfig(
-                  base_url="https://hapi.fhir.org/baseR4/",
+                  base_url="http://localhost:8080/fhir/",
                   client_id="aws_test_client"
               )
               assert config.base_url
@@ -827,7 +827,7 @@ jobs:
             NETWORK_HOST: "0.0.0.0"
             NETWORK_PROTOCOL: "https"
             EXTERNAL_HOST: "healthcare-ai-${{ needs.setup.outputs.environment }}.aws.local"
-            FHIR_BASE_URL: "https://hapi.fhir.org/baseR4/"
+            FHIR_BASE_URL: "http://localhost:8080/fhir/"
             FHIR_MCP_URL: "https://healthcare-ai-${{ needs.setup.outputs.environment }}.aws.local/fhir-mcp"
             FHIR_MCP_INTERNAL_URL: "http://fhir-mcp-server-service:8003"
             FHIR_PROXY_URL: "https://healthcare-ai-${{ needs.setup.outputs.environment }}.aws.local/fhir-proxy"

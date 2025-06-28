@@ -75,7 +75,7 @@ jobs:
           
           def test_gcp_environment():
               config = FHIRConfig(
-                  base_url="https://hapi.fhir.org/baseR4/",
+                  base_url="http://localhost:8080/fhir/",
                   client_id="gcp_test_client"
               )
               assert config.base_url
