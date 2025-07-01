@@ -1078,6 +1078,7 @@ Search operations return a FHIR Bundle containing:
 - [US Core Patient Profile](https://build.fhir.org/ig/HL7/US-Core/StructureDefinition-us-core-patient.html) - US-specific implementation
 - [FHIR JSON Format](https://hl7.org/fhir/r4/json.html) - JSON representation specification
 - [FHIR Terminology](https://terminology.hl7.org/) - Standard code systems and value sets
+- [Azure Health Data Services](https://github.com/microsoft/azure-health-data-services-toolkit)
 
 ---
 
