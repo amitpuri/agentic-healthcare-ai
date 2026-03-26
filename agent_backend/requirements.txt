@@ -1,7 +1,7 @@
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 pydantic>=2.7.0,<3.0.0
-requests==2.32.4
+requests==2.33.0
 python-multipart==0.0.22
 
 # Core AI Framework (choose one to avoid conflicts)
