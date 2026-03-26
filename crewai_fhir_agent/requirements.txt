@@ -1,7 +1,7 @@
 crewai[tools]==0.51.0
 langchain-openai==0.1.8
 python-dotenv==1.0.0
-requests==2.32.4
+requests==2.33.0
 fhir.resources==7.1.0
 pydantic>=2.7.0,<3.0.0
 fastapi==0.104.1
