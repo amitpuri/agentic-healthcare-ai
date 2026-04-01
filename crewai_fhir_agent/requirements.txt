@@ -20,5 +20,5 @@ httpx==0.25.2
 aiofiles==23.2.1
 # PDF generation and MCP dependencies
 reportlab==4.0.7
-aiohttp==3.13.3
+aiohttp==3.13.4
 pathlib 
