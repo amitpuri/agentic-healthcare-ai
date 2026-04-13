@@ -20,7 +20,7 @@ python-dotenv==1.0.0
 aiofiles==23.2.1
 
 # Testing
-pytest==8.2.0
+pytest==9.0.3
 pytest-asyncio==0.21.1
 httpx==0.25.2
 ag2==0.2.16
