@@ -23,7 +23,7 @@ pydantic==2.11.5
 pydantic-core==2.33.2
 pydantic-settings==2.9.1
 pygments==2.19.1
-python-dotenv==1.1.0
+python-dotenv==1.2.2
 python-multipart==0.0.22
 pytz==2025.2
 requests==2.32.4
