@@ -21,5 +21,5 @@ aiofiles==23.2.1
 docker==6.1.3
 # PDF generation and MCP dependencies
 reportlab==4.0.7
-aiohttp==3.13.3
+aiohttp==3.14.0
 pathlib 
