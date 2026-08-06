@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 import uvicorn
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, WebSocket, WebSocketDisconnect, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -43,6 +44,7 @@ except ImportError as e:
     class ClinicalAssessment:
         pass
 from agents import HealthcareAutogenSystem
+from service_auth import UNAUTHORIZED_DETAIL, UNAUTHORIZED_HEADERS, token_is_valid
 
 # Load environment variables
 load_dotenv()
@@ -79,7 +81,7 @@ os.makedirs(reports_dir, exist_ok=True)
 app.mount("/static/reports", StaticFiles(directory=reports_dir), name="reports")
 
 # Security
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 # Global variables
 autogen_system: HealthcareAutogenSystem = None
@@ -140,11 +142,62 @@ class PDFGenerationResponse(BaseModel):
     error: str = None
 
 
+class LLMQuotaExhausted(Exception):
+    """The upstream LLM provider rejected the call for lack of quota/credit."""
+
+    def __init__(self, provider_message: str):
+        super().__init__(provider_message)
+        self.provider_message = provider_message
+
+
+# The provider signals this several ways depending on plan and endpoint.
+_QUOTA_MARKERS = (
+    "insufficient_quota",
+    "credit_balance_exhausted",
+    "no credits remaining",
+    "exceeded your current quota",
+    "billing_hard_limit_reached",
+)
+
+
+def raise_if_quota_exhausted(exc: Exception):
+    """Re-raise an LLM failure as a quota error when that is what it is.
+
+    Quota exhaustion is an availability condition, not a server fault: callers
+    need a 503 they can back off on, not an opaque 500.
+    """
+    text = str(exc).lower()
+    if any(marker in text for marker in _QUOTA_MARKERS):
+        raise LLMQuotaExhausted(str(exc)) from exc
+
+
+@app.exception_handler(LLMQuotaExhausted)
+async def llm_quota_exhausted_handler(request, exc: LLMQuotaExhausted):
+    logger.error(f"LLM quota exhausted: {exc.provider_message}")
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": "300"},
+        content={
+            "error": "llm_quota_exhausted",
+            "message": (
+                "The shared LLM provider account has no remaining quota or credit, so no "
+                "agent assessment could be run. No clinical conclusion was produced."
+            ),
+            "provider_message": exc.provider_message,
+            "retry_after_seconds": 300,
+        },
+    )
+
+
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Validate authentication token"""
-    # In production, implement proper JWT validation
-    if not credentials.credentials:
-        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+    """Authenticate the caller against the shared internal service token."""
+    presented = f"{credentials.scheme} {credentials.credentials}" if credentials else None
+    if not token_is_valid(presented):
+        raise HTTPException(
+            status_code=401,
+            detail=UNAUTHORIZED_DETAIL,
+            headers=UNAUTHORIZED_HEADERS,
+        )
     return {"user_id": "healthcare_provider", "role": "physician"}
 
 
@@ -169,7 +222,8 @@ async def startup_event():
         # Initialize Autogen system
         autogen_system = HealthcareAutogenSystem(
             openai_api_key=os.getenv("OPENAI_API_KEY"),
-            fhir_config=fhir_config
+            fhir_config=fhir_config,
+            mcp_url=os.getenv("FHIR_MCP_URL")
         )
         
         logger.info("Autogen Healthcare Agent System initialized successfully")
@@ -229,8 +283,11 @@ async def start_comprehensive_conversation(
         logger.info(f"Starting comprehensive conversation for patient {request.patient_id}")
         
         # Run comprehensive assessment with multi-agent conversation
-        result = await autogen_system.run_comprehensive_assessment(request.patient_id)
-        
+        result = await autogen_system.run_comprehensive_assessment(
+            request.patient_id,
+            request.chief_complaint
+        )
+
         conversation_id = f"comp_{request.patient_id}_{int(asyncio.get_event_loop().time())}"
         
         # Log conversation completion
@@ -253,6 +310,7 @@ async def start_comprehensive_conversation(
         )
         
     except Exception as e:
+        raise_if_quota_exhausted(e)
         import traceback
         error_details = traceback.format_exc()
         logger.error(f"Comprehensive conversation failed for patient {request.patient_id}: {e}")
@@ -298,6 +356,7 @@ async def start_emergency_conversation(
         )
         
     except Exception as e:
+        raise_if_quota_exhausted(e)
         logger.error(f"Emergency conversation failed for patient {request.patient_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Emergency conversation failed: {str(e)}")
 
@@ -337,6 +396,7 @@ async def start_medication_review_conversation(
         )
         
     except Exception as e:
+        raise_if_quota_exhausted(e)
         logger.error(f"Medication review failed for patient {request.patient_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Medication review failed: {str(e)}")
 
@@ -467,7 +527,9 @@ async def websocket_conversation(websocket: WebSocket, patient_id: str):
             elif conversation_type == "medication":
                 result = await autogen_system.run_medication_reconciliation(patient_id)
             else:
-                result = await autogen_system.run_comprehensive_assessment(patient_id)
+                result = await autogen_system.run_comprehensive_assessment(
+                    patient_id, message.get("chief_complaint")
+                )
             
             # Send conversation updates
             await websocket.send_text(json.dumps({
@@ -524,27 +586,36 @@ async def generate_assessment_pdf(
         mcp_url = os.getenv("FHIR_MCP_URL", "http://localhost:8003")
         fhir_tools = FHIRToolsForAgents(mcp_url=mcp_url)
         
-        # Generate the PDF using the FHIR tools
+        # generate_assessment_pdf takes no conversation_data argument; passing it
+        # raised TypeError on every call. Carry it inside assessment_data instead.
+        assessment_data = dict(request.assessment_data or {})
+        if request.conversation_data:
+            assessment_data["conversation"] = request.conversation_data
+
         pdf_result = await fhir_tools.generate_assessment_pdf(
             patient_id=request.patient_id,
-            assessment_data=request.assessment_data,
-            conversation_data=request.conversation_data,
+            assessment_data=assessment_data,
             filename=request.filename or f"assessment_{request.patient_id}_{request.assessment_type}.pdf"
         )
         
-        if pdf_result.get("success"):
-            # Return the file path and metadata
+        # generate_assessment_pdf returns a JSON string keyed pdf_path/status,
+        # not a dict keyed success/file_path/filename/file_size.
+        if isinstance(pdf_result, str):
+            pdf_result = json.loads(pdf_result)
+
+        if pdf_result.get("status") == "success":
+            pdf_path = pdf_result.get("pdf_path") or ""
             return PDFGenerationResponse(
                 success=True,
-                pdfPath=pdf_result.get("file_path"),
-                filename=pdf_result.get("filename"),
-                size=pdf_result.get("file_size", 0)
+                pdfPath=pdf_path,
+                filename=os.path.basename(pdf_path),
+                size=os.path.getsize(pdf_path) if pdf_path and os.path.exists(pdf_path) else 0
             )
-        else:
-            return PDFGenerationResponse(
-                success=False,
-                error=pdf_result.get("error", "Failed to generate PDF")
-            )
+
+        return PDFGenerationResponse(
+            success=False,
+            error=pdf_result.get("error", "Failed to generate PDF")
+        )
         
     except Exception as e:
         logger.error(f"Error generating PDF: {e}")
@@ -559,7 +630,7 @@ async def generate_assessment_pdf(
 async def run_comprehensive_conversation_compat(
     request: ConversationRequest,
     background_tasks: BackgroundTasks,
-    authorization: str = Header(None),
+    x_openai_api_key: str = Header(None),
     current_user: dict = Depends(get_current_user)
 ):
     """Frontend-compatible comprehensive conversation endpoint with custom API key support"""
@@ -573,12 +644,12 @@ async def run_comprehensive_conversation_compat(
     try:
         logger.info(f"Starting comprehensive conversation for patient {request.patient_id}")
         
-        # Extract API key from Authorization header if provided
-        api_key = None
-        if authorization and authorization.startswith("Bearer "):
-            api_key = authorization[7:]  # Remove "Bearer " prefix
-            logger.info(f"Using API key from request header: {api_key[:10]}...{api_key[-4:]}")
-        
+        # Authorization now carries the internal service token, so a caller-supplied
+        # OpenAI key travels in its own header.
+        api_key = x_openai_api_key
+        if api_key:
+            logger.info("Using caller-supplied OpenAI API key from X-OpenAI-API-Key header")
+
         # Start tracking the conversation
         comm_id = tracker.start_communication(
             agent_id="autogen_comprehensive_system",
@@ -600,10 +671,14 @@ async def run_comprehensive_conversation_compat(
                 fhir_config=autogen_system.fhir_client.config,
                 mcp_url=autogen_system.mcp_url
             )
-            result = await temp_autogen_system.run_comprehensive_assessment(request.patient_id)
+            result = await temp_autogen_system.run_comprehensive_assessment(
+                request.patient_id, request.chief_complaint
+            )
         else:
             # Use the default system instance
-            result = await autogen_system.run_comprehensive_assessment(request.patient_id)
+            result = await autogen_system.run_comprehensive_assessment(
+                request.patient_id, request.chief_complaint
+            )
         
         conversation_id = f"comp_{request.patient_id}_{int(asyncio.get_event_loop().time())}"
         
@@ -657,7 +732,8 @@ async def run_comprehensive_conversation_compat(
             )
             
             logger.error(f"Tracked error: {error_type} ({error_code}) - {error_message}")
-        
+
+        raise_if_quota_exhausted(e)
         raise HTTPException(status_code=500, detail=f"Conversation failed: {str(e)}")
 
 
@@ -682,7 +758,7 @@ async def run_medication_review_compat(
 
 
 @app.get("/communications")
-async def get_communications():
+async def get_communications(current_user: dict = Depends(get_current_user)):
     """Get agent communications history with detailed error tracking"""
     from llm_communication_tracker import get_tracker
     
@@ -747,7 +823,7 @@ async def get_communications():
 
 
 @app.get("/communications/stats")
-async def get_communication_stats():
+async def get_communication_stats(current_user: dict = Depends(get_current_user)):
     """Get communication statistics with enhanced error tracking"""
     from llm_communication_tracker import get_tracker
     

@@ -6,11 +6,30 @@ import os
 from typing import Optional
 import logging
 
+from service_auth import UNAUTHORIZED_DETAIL, UNAUTHORIZED_HEADERS, token_is_valid
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="FHIR Proxy Service", description="Proxy service to handle FHIR requests with CORS support")
+
+# Paths reachable without the internal service token. Everything else — including
+# any route added later — requires it, so PHI cannot be exposed by omission.
+PUBLIC_PATHS = {"/health", "/docs", "/openapi.json", "/redoc"}
+
+
+@app.middleware("http")
+async def require_service_token(request: Request, call_next):
+    if request.method != "OPTIONS" and request.url.path not in PUBLIC_PATHS:
+        if not token_is_valid(request.headers.get("authorization")):
+            return JSONResponse(
+                {"detail": UNAUTHORIZED_DETAIL},
+                status_code=401,
+                headers=UNAUTHORIZED_HEADERS,
+            )
+    return await call_next(request)
+
 
 # Add CORS middleware
 app.add_middleware(
@@ -22,7 +41,7 @@ app.add_middleware(
 )
 
 # Default FHIR server
-DEFAULT_FHIR_URL = "http://localhost:8080/fhir"
+DEFAULT_FHIR_URL = os.getenv("FHIR_SERVER_URL", "http://localhost:8080/fhir")
 
 def normalize_fhir_url(url: str) -> str:
     """Normalize FHIR URL by removing trailing slash to prevent double slash issues"""
