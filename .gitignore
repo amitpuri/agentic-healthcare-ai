@@ -10,6 +10,8 @@ Thumbs.db
 # Environment variables
 .env
 .env.local
+compose-secrets.local
+docker/compose-secrets.local
 .env.development.local
 .env.test.local
 .env.production.local

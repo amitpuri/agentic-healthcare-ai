@@ -4,13 +4,16 @@ Main application for running healthcare AI agents with FHIR integration
 """
 
 import asyncio
+import json
 import logging
 import os
+from datetime import datetime
 from typing import Dict, Any
 from dotenv import load_dotenv
 import uvicorn
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -41,7 +44,8 @@ except ImportError as e:
     
     class ClinicalAssessment:
         pass
-from agents import HealthcareAgentManager
+from agents import HealthcareAgentManager, LLMQuotaExhausted, kickoff, serialize_crew_output
+from service_auth import UNAUTHORIZED_DETAIL, UNAUTHORIZED_HEADERS, token_is_valid
 
 # Load environment variables
 load_dotenv()
@@ -78,7 +82,7 @@ os.makedirs(reports_dir, exist_ok=True)
 app.mount("/static/reports", StaticFiles(directory=reports_dir), name="reports")
 
 # Security
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 # Global variables
 agent_manager: HealthcareAgentManager = None
@@ -125,11 +129,31 @@ class PDFGenerationResponse(BaseModel):
     error: str = None
 
 
+def llm_unavailable_response(exc: LLMQuotaExhausted) -> JSONResponse:
+    """503 with a machine-readable reason, so callers can tell an exhausted LLM
+    provider apart from a broken service."""
+    retry_after = exc.retry_after or 300
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": str(retry_after)},
+        content={
+            "error": exc.error_code,
+            "message": str(exc),
+            "retry_after": retry_after,
+            "service": "crewai-healthcare-agent",
+        },
+    )
+
+
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Validate authentication token"""
-    # In production, implement proper JWT validation
-    if not credentials.credentials:
-        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+    """Authenticate the caller against the shared internal service token."""
+    presented = f"{credentials.scheme} {credentials.credentials}" if credentials else None
+    if not token_is_valid(presented):
+        raise HTTPException(
+            status_code=401,
+            detail=UNAUTHORIZED_DETAIL,
+            headers=UNAUTHORIZED_HEADERS,
+        )
     return {"user_id": "healthcare_provider", "role": "physician"}
 
 
@@ -202,8 +226,11 @@ async def run_comprehensive_assessment(
         logger.info(f"Starting comprehensive assessment for patient {request.patient_id}")
         
         # Run assessment asynchronously
-        result = await agent_manager.run_patient_assessment(request.patient_id)
-        
+        result = await agent_manager.run_patient_assessment(
+            request.patient_id,
+            request.chief_complaint
+        )
+
         # Log assessment completion
         background_tasks.add_task(
             log_assessment_completion,
@@ -211,16 +238,20 @@ async def run_comprehensive_assessment(
             "comprehensive",
             current_user["user_id"]
         )
-        
+
         return {
             "status": "completed",
             "assessment_id": f"assess_{request.patient_id}_{int(asyncio.get_event_loop().time())}",
             "patient_id": request.patient_id,
             "assessment_type": "comprehensive",
+            "chief_complaint": request.chief_complaint,
             "results": result,
             "provider": current_user["user_id"]
         }
-        
+
+    except LLMQuotaExhausted as e:
+        logger.error(f"LLM provider unavailable for patient {request.patient_id}: {e}")
+        return llm_unavailable_response(e)
     except Exception as e:
         logger.error(f"Assessment failed for patient {request.patient_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Assessment failed: {str(e)}")
@@ -260,7 +291,10 @@ async def run_emergency_assessment(
             "results": result,
             "provider": current_user["user_id"]
         }
-        
+
+    except LLMQuotaExhausted as e:
+        logger.error(f"LLM provider unavailable for patient {request.patient_id}: {e}")
+        return llm_unavailable_response(e)
     except Exception as e:
         logger.error(f"Emergency assessment failed for patient {request.patient_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Emergency assessment failed: {str(e)}")
@@ -278,8 +312,8 @@ async def run_medication_reconciliation(
         
         # Create medication reconciliation crew
         crew = agent_manager.create_medication_reconciliation_crew(request.patient_id)
-        result = crew.kickoff()
-        
+        result = serialize_crew_output(await asyncio.to_thread(kickoff, crew), crew)
+
         # Log completion
         background_tasks.add_task(
             log_assessment_completion,
@@ -297,6 +331,9 @@ async def run_medication_reconciliation(
             "provider": current_user["user_id"]
         }
         
+    except LLMQuotaExhausted as e:
+        logger.error(f"LLM provider unavailable for patient {request.patient_id}: {e}")
+        return llm_unavailable_response(e)
     except Exception as e:
         logger.error(f"Medication reconciliation failed for patient {request.patient_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Medication reconciliation failed: {str(e)}")
@@ -392,23 +429,27 @@ async def generate_assessment_pdf(
         pdf_result = await fhir_tools.generate_assessment_pdf(
             patient_id=request.patient_id,
             assessment_data=request.assessment_data,
-            conversation_data=request.conversation_data,
             filename=request.filename or f"assessment_{request.patient_id}_{request.assessment_type}.pdf"
         )
         
-        if pdf_result.get("success"):
-            # Return the file path and metadata
+        # generate_assessment_pdf returns a JSON string keyed pdf_path/status,
+        # not a dict keyed success/file_path/filename/file_size.
+        if isinstance(pdf_result, str):
+            pdf_result = json.loads(pdf_result)
+
+        if pdf_result.get("status") == "success":
+            pdf_path = pdf_result.get("pdf_path") or ""
             return PDFGenerationResponse(
                 success=True,
-                pdfPath=pdf_result.get("file_path"),
-                filename=pdf_result.get("filename"),
-                size=pdf_result.get("file_size", 0)
+                pdfPath=pdf_path,
+                filename=os.path.basename(pdf_path),
+                size=os.path.getsize(pdf_path) if pdf_path and os.path.exists(pdf_path) else 0
             )
-        else:
-            return PDFGenerationResponse(
-                success=False,
-                error=pdf_result.get("error", "Failed to generate PDF")
-            )
+
+        return PDFGenerationResponse(
+            success=False,
+            error=pdf_result.get("error", "Failed to generate PDF")
+        )
         
     except Exception as e:
         logger.error(f"Error generating PDF: {e}")
@@ -423,7 +464,7 @@ async def generate_assessment_pdf(
 async def run_comprehensive_assessment_compat(
     request: AssessmentRequest,
     background_tasks: BackgroundTasks,
-    authorization: str = Header(None),
+    x_openai_api_key: str = Header(None),
     current_user: dict = Depends(get_current_user)
 ):
     """Frontend-compatible comprehensive assessment endpoint with custom API key support"""
@@ -437,12 +478,12 @@ async def run_comprehensive_assessment_compat(
     try:
         logger.info(f"Starting comprehensive assessment for patient {request.patient_id}")
         
-        # Extract API key from Authorization header if provided
-        api_key = None
-        if authorization and authorization.startswith("Bearer "):
-            api_key = authorization[7:]  # Remove "Bearer " prefix
-            logger.info(f"Using API key from request header: {api_key[:10]}...{api_key[-4:]}")
-        
+        # Authorization now carries the internal service token, so a caller-supplied
+        # OpenAI key travels in its own header.
+        api_key = x_openai_api_key
+        if api_key:
+            logger.info("Using caller-supplied OpenAI API key from X-OpenAI-API-Key header")
+
         # Start tracking the conversation
         comm_id = tracker.start_communication(
             agent_id="crewai_comprehensive_system",
@@ -464,17 +505,21 @@ async def run_comprehensive_assessment_compat(
                 fhir_config=agent_manager.fhir_client.config,
                 mcp_url=agent_manager.mcp_url
             )
-            result = await temp_agent_manager.run_patient_assessment(request.patient_id)
+            result = await temp_agent_manager.run_patient_assessment(
+                request.patient_id, request.chief_complaint
+            )
         else:
             # Use the default agent manager instance
-            result = await agent_manager.run_patient_assessment(request.patient_id)
+            result = await agent_manager.run_patient_assessment(
+                request.patient_id, request.chief_complaint
+            )
         
         # Complete successful tracking
         if comm_id:
             response_time = int((time.time() - start_time) * 1000)
             tracker.complete_communication(
                 comm_id=comm_id,
-                final_response=str(result.get("summary", "")),
+                final_response=str(result.get("results", {}).get("raw", "")),
                 response_time_ms=response_time,
                 confidence_score=0.85
             )
@@ -487,18 +532,32 @@ async def run_comprehensive_assessment_compat(
             current_user["user_id"]
         )
         
+        assessment = result.get("results", {})
         return {
             "success": True,
             "patient_id": request.patient_id,
             "assessment_type": "comprehensive",
+            "chief_complaint": request.chief_complaint,
             "timestamp": datetime.now().isoformat(),
-            "agents_used": result.get("agents", []),
-            "summary": result.get("summary", {}),
-            "recommendations": result.get("recommendations", []),
-            "conversation_history": result.get("conversation_history", []),
-            "participating_agents": result.get("participating_agents", [])
+            "agents_used": result.get("crew_composition", []),
+            "summary": assessment.get("raw", ""),
+            "recommendations": [],
+            "conversation_history": assessment.get("tasks", []),
+            "participating_agents": result.get("crew_composition", [])
         }
-        
+
+    except LLMQuotaExhausted as e:
+        logger.error(f"LLM provider unavailable for patient {request.patient_id}: {e}")
+        if comm_id:
+            tracker.complete_communication(
+                comm_id=comm_id,
+                final_response="",
+                response_time_ms=int((time.time() - start_time) * 1000),
+                error_message=str(e),
+                error_type=e.error_code,
+                error_code=e.error_code,
+            )
+        return llm_unavailable_response(e)
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
@@ -545,7 +604,7 @@ async def run_medication_reconciliation_compat(
 
 
 @app.get("/communications")
-async def get_communications():
+async def get_communications(current_user: dict = Depends(get_current_user)):
     """Get agent communications history with detailed error tracking"""
     from llm_communication_tracker import get_tracker
     
@@ -610,7 +669,7 @@ async def get_communications():
 
 
 @app.get("/communications/stats")
-async def get_communication_stats():
+async def get_communication_stats(current_user: dict = Depends(get_current_user)):
     """Get communication statistics with enhanced error tracking"""
     from llm_communication_tracker import get_tracker
     

@@ -525,7 +525,7 @@ class AutoGenLLMWrapper:
 
             except Exception as e:
                 # Log the error and complete the communication with an error state
-                error_type, error_message, error_code = self.tracker.parse_openai_error(e)
+                error_message, error_type, error_code = self.tracker.parse_openai_error(e)
                 logger.error(f"AutoGen LLM communication failed for agent {agent_name}: {error_type} ({error_code}) - {error_message}")
                 
                 # Ensure we have a final response value, even if it's just the error

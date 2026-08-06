@@ -21,6 +21,7 @@ COPY fhir_mcp_server/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the application code
+COPY shared/service_auth.py .
 COPY fhir_mcp_server/ .
 
 # Create a non-root user

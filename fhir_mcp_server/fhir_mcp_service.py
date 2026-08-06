@@ -22,6 +22,8 @@ from starlette.requests import Request
 import uvicorn
 import httpx
 
+from service_auth import UNAUTHORIZED_DETAIL, UNAUTHORIZED_HEADERS, token_is_valid
+
 logger = logging.getLogger(__name__)
 
 # Configuration from environment variables
@@ -822,7 +824,20 @@ async def mcp_endpoint(request: Request) -> JSONResponse:
     
     if request.method == "OPTIONS":
         return JSONResponse({"message": "OK"}, headers=headers)
-    
+
+    if not token_is_valid(request.headers.get("authorization")):
+        logger.warning("Rejected unauthenticated MCP request")
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32001, "message": UNAUTHORIZED_DETAIL},
+            },
+            status_code=401,
+            headers={**headers, **UNAUTHORIZED_HEADERS},
+        )
+
+    request_id = 1
     try:
         body = await request.json()
         method = body.get("method")

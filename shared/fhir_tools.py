@@ -35,6 +35,16 @@ class FHIRMCPClient:
         self.tool_use = tool_use
         self.session = None
         self.request_id = 1
+
+    def _auth_headers(self) -> Dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        token = os.getenv("INTERNAL_SERVICE_TOKEN", "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
         
     async def __aenter__(self):
         self.session = aiohttp.ClientSession()
@@ -62,12 +72,9 @@ class FHIRMCPClient:
         
         try:
             async with self.session.post(
-                f"{self.mcp_url}/mcp",
+                f"{self.mcp_url.rstrip('/')}/",
                 json=request_data,
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json"
-                }
+                headers=self._auth_headers()
             ) as response:
                 result = await response.json()
                 
@@ -96,9 +103,92 @@ class FHIRMCPClient:
         """Get vital signs analysis"""
         return await self.call_mcp_tool("get_vital_signs_analysis", {"patient_id": patient_id, "days": days})
     
-    async def search_fhir_resources(self, resource_type: str, search_params: Dict[str, str]) -> Dict[str, Any]:
-        """Search FHIR resources"""
-        return await self.call_mcp_tool("search", {"type": resource_type, "searchParam": search_params})
+    async def search_fhir_resources(
+        self,
+        resource_type: str,
+        search_params: Dict[str, str],
+        response_format: str = "mcp",
+    ) -> Dict[str, Any]:
+        """Search FHIR resources.
+
+        response_format="fhir" returns a real FHIR Bundle; the default "mcp"
+        format only reports resource IDs, which is not enough for an agent to
+        reason clinically.
+        """
+        return await self.call_mcp_tool(
+            "search",
+            {"type": resource_type, "searchParam": search_params, "format": response_format},
+        )
+
+
+def _concept_display(concept: Any) -> str:
+    """Best human-readable label for a FHIR CodeableConcept."""
+    if not isinstance(concept, dict):
+        return ""
+    for coding in concept.get("coding") or []:
+        label = coding.get("display") or coding.get("code")
+        if label:
+            return label
+    return concept.get("text", "")
+
+
+def _summarize_condition(resource: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "condition": _concept_display(resource.get("code")),
+        "clinical_status": _concept_display(resource.get("clinicalStatus")),
+        "verification_status": _concept_display(resource.get("verificationStatus")),
+        "onset": resource.get("onsetDateTime") or resource.get("recordedDate", ""),
+    }
+
+
+def _summarize_medication(resource: Dict[str, Any]) -> Dict[str, Any]:
+    dosage = resource.get("dosageInstruction") or []
+    return {
+        "medication": _concept_display(resource.get("medicationCodeableConcept")),
+        "status": resource.get("status", ""),
+        "intent": resource.get("intent", ""),
+        "dosage": dosage[0].get("text", "") if dosage else "",
+        "authored_on": resource.get("authoredOn", ""),
+    }
+
+
+def _summarize_observation(resource: Dict[str, Any]) -> Dict[str, Any]:
+    quantity = resource.get("valueQuantity") or {}
+    value = quantity.get("value")
+    if value is None:
+        value = _concept_display(resource.get("valueCodeableConcept")) or resource.get("valueString", "")
+    return {
+        "observation": _concept_display(resource.get("code")),
+        "value": value,
+        "unit": quantity.get("unit", ""),
+        "effective": resource.get("effectiveDateTime", ""),
+        "interpretation": _concept_display((resource.get("interpretation") or [None])[0]),
+    }
+
+
+def _summarize_allergy(resource: Dict[str, Any]) -> Dict[str, Any]:
+    reactions = []
+    for reaction in resource.get("reaction") or []:
+        for manifestation in reaction.get("manifestation") or []:
+            label = _concept_display(manifestation)
+            if label:
+                reactions.append(label)
+    return {
+        "substance": _concept_display(resource.get("code")),
+        "criticality": resource.get("criticality", ""),
+        "clinical_status": _concept_display(resource.get("clinicalStatus")),
+        "reactions": reactions,
+    }
+
+
+# Resource types pulled for every assessment, with the summarizer that flattens
+# each into the compact shape an LLM can actually reason over.
+CLINICAL_RESOURCE_SUMMARIZERS = {
+    "conditions": ("Condition", _summarize_condition),
+    "medications": ("MedicationRequest", _summarize_medication),
+    "observations": ("Observation", _summarize_observation),
+    "allergies": ("AllergyIntolerance", _summarize_allergy),
+}
 
 
 class PatientAssessmentReport:
@@ -408,20 +498,44 @@ class FHIRToolsForAgents:
         self.mcp_client = FHIRMCPClient(mcp_url)
         self.pdf_generator = PatientAssessmentReport()
     
+    async def _get_clinical_records(self, client: FHIRMCPClient, patient_id: str) -> Dict[str, Any]:
+        """Fetch the clinical record types an assessment needs, as real resources."""
+
+        async def fetch(key: str, resource_type: str, summarize) -> tuple:
+            try:
+                bundle = await client.search_fhir_resources(
+                    resource_type,
+                    {"patient": f"Patient/{patient_id}"},
+                    response_format="fhir",
+                )
+                entries = bundle.get("entry") or []
+                return key, [summarize(entry.get("resource", {})) for entry in entries]
+            except Exception as ex:
+                logger.error(f"Failed to fetch {resource_type} for {patient_id}: {ex}")
+                return key, {"error": str(ex)}
+
+        results = await asyncio.gather(*[
+            fetch(key, resource_type, summarize)
+            for key, (resource_type, summarize) in CLINICAL_RESOURCE_SUMMARIZERS.items()
+        ])
+        return dict(results)
+
     async def get_patient_for_assessment(self, patient_id: str) -> str:
         """Get comprehensive patient data for AI assessment (JSON formatted for agent consumption)"""
         try:
             async with self.mcp_client as client:
                 config = await client.get_tool_config()
                 patient_data = await client.get_patient_comprehensive_data(patient_id)
-                
+                clinical_records = await self._get_clinical_records(client, patient_id)
+
                 return json.dumps({
                     "tool_config": config,
                     "patient_data": patient_data,
+                    "clinical_records": clinical_records,
                     "status": "success",
                     "timestamp": datetime.now().isoformat()
                 }, indent=2)
-                
+
         except Exception as e:
             return json.dumps({"error": f"Failed to get patient data: {str(e)}"})
     

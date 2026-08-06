@@ -12,6 +12,7 @@ COPY fhir_proxy/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
+COPY shared/service_auth.py .
 COPY fhir_proxy/main.py .
 
 # Expose port

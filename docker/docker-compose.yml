@@ -14,6 +14,7 @@ services:
       - ../.env
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set}
       - FHIR_SERVER_URL=http://hapi-fhir:8080/fhir
       - FHIR_AUTH_TOKEN=${FHIR_AUTH_TOKEN:-}
       - WEBHOOK_URL=${WEBHOOK_URL:-}
@@ -53,7 +54,12 @@ services:
       - ../.env
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set}
       - FHIR_SERVER_URL=http://hapi-fhir:8080/fhir
+      # .env carries the browser-facing localhost URL; inside the compose network
+      # the agent must reach the MCP server by service name.
+      - REACT_APP_FHIR_MCP_URL=http://fhir-mcp-server:8004
+      - FHIR_MCP_URL=http://fhir-mcp-server:8004
       - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/healthcare_ai}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379}
       - ENVIRONMENT=docker
@@ -86,7 +92,14 @@ services:
       - ../.env
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set}
       - FHIR_SERVER_URL=http://hapi-fhir:8080/fhir
+      # ../.env sets these to localhost, which resolves to the container itself.
+      # Override with in-network names so FHIR retrieval actually reaches a server.
+      - FHIR_BASE_URL=http://hapi-fhir:8080/fhir/
+      - FHIR_PROXY_URL=http://fhir-proxy:8003/fhir
+      - FHIR_MCP_URL=http://fhir-mcp-server:8004
+      - REACT_APP_FHIR_MCP_URL=http://fhir-mcp-server:8004
       - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/healthcare_ai}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379}
       - ENVIRONMENT=docker
@@ -116,6 +129,9 @@ services:
     container_name: fhir-proxy
     ports:
       - "8003:8003"
+    environment:
+      - FHIR_SERVER_URL=http://hapi-fhir:8080/fhir
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set}
     networks:
       - healthcare-network
     restart: unless-stopped
@@ -140,6 +156,7 @@ services:
       - FHIR_MCP_SERVER_URL=http://localhost:8004
       - FHIR_MCP_FHIR__BASE_URL=http://hapi-fhir:8080/fhir
       - FHIR_MCP_FHIR__ACCESS_TOKEN=${FHIR_ACCESS_TOKEN:-}
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?INTERNAL_SERVICE_TOKEN must be set}
       - FHIR_MCP_FHIR__TIMEOUT=30
       # FHIR_MCP_USE_SIMPLE removed - only simple server available
     networks:
@@ -193,8 +210,11 @@ services:
   hapi-fhir:
     image: hapiproject/hapi:v6.8.0
     container_name: hapi-fhir
-    ports:
-      - "8080:8080"
+    # No host port mapping: the bare HAPI JPA server has no app-level auth, so it is
+    # reachable only from other containers on healthcare-network (fhir-proxy,
+    # fhir-mcp-server, the agent services), never directly from the host.
+    expose:
+      - "8080"
     environment:
       - hapi.fhir.server.url=http://hapi-fhir:8080/fhir
       - hapi.fhir.validation.enabled=true
@@ -210,11 +230,9 @@ services:
     networks:
       - healthcare-network
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/fhir/metadata"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
+    # No healthcheck: the hapiproject/hapi image is distroless (java entrypoint,
+    # no shell/curl/wget), so any in-container probe is unsatisfiable.
+    # Verify externally: curl http://localhost:8080/fhir/metadata
 
   # Database Services
   postgres:
@@ -373,7 +391,7 @@ services:
       - healthcare-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/health"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:80/health"]
       interval: 30s
       timeout: 10s
       retries: 3
